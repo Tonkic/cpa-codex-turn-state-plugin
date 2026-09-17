@@ -1,0 +1,7 @@
+/dist/
+/*.dll
+/*.h
+/*.so
+/*.dylib
+/state/
+*.tmp
