@@ -29,7 +29,7 @@ jobs:
       - name: Verify plugin export
         shell: pwsh
         run: |
-          $exports = objdump -p dist/windows-amd64/cpa-codex-turn-state.dll
+          $exports = (objdump -p dist/windows-amd64/cpa-codex-turn-state.dll) -join "`n"
           if ($exports -notmatch 'cliproxy_plugin_init') { throw 'missing cliproxy_plugin_init export' }
       - uses: actions/upload-artifact@v4
         with:
