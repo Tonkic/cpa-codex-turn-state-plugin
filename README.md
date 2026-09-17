@@ -40,6 +40,8 @@ plugins:
       auto_update: true
       inject_expired: false
       state_file: "state/codex-turn-state.json"
+      defaults:
+        accepted_blocks: [10, 12]
       credentials:
         "<selected_auth_id>":
           plan: plus
@@ -57,6 +59,8 @@ Supported plans and default normal ciphertext block counts:
 | Team | 12 | 332 |
 
 An observed Pro/Plus state with 11 blocks or Team state with 13 blocks is not promoted. For another account type, set `normal_blocks` explicitly. Unknown plans without `normal_blocks` never auto-promote.
+
+`defaults` applies only to selected auth IDs that are not explicitly listed. It is useful when auth IDs contain private account identifiers: `accepted_blocks: [10, 12]` bootstraps both Plus/Pro and Team states without copying those IDs into configuration. A shared `defaults.state` is rejected so one credential's state can never seed another credential. Explicit `credentials` entries override the fallback policy.
 
 Per-credential `auto_update` overrides the global setting.
 

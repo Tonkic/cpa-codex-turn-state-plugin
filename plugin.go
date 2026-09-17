@@ -19,7 +19,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.1.0"
+	pluginVersion     = "0.1.1"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -46,15 +46,17 @@ type pluginConfig struct {
 	InjectExpired bool                        `yaml:"inject_expired"`
 	StateFile     string                      `yaml:"state_file"`
 	MaxStateBytes int                         `yaml:"max_state_bytes"`
+	Defaults      *credentialConfig           `yaml:"defaults"`
 	Credentials   map[string]credentialConfig `yaml:"credentials"`
 }
 
 type credentialConfig struct {
-	Plan         string   `yaml:"plan"`
-	NormalBlocks int      `yaml:"normal_blocks"`
-	State        string   `yaml:"state"`
-	Models       []string `yaml:"models"`
-	AutoUpdate   *bool    `yaml:"auto_update"`
+	Plan           string   `yaml:"plan"`
+	NormalBlocks   int      `yaml:"normal_blocks"`
+	AcceptedBlocks []int    `yaml:"accepted_blocks"`
+	State          string   `yaml:"state"`
+	Models         []string `yaml:"models"`
+	AutoUpdate     *bool    `yaml:"auto_update"`
 }
 
 type storedState struct {
@@ -223,6 +225,7 @@ func pluginRegistration() registration {
 				{Name: "auto_update", Type: "boolean", Description: "Promote a newer normal Fernet state after a successful request."},
 				{Name: "inject_expired", Type: "boolean", Description: "Allow injection after the one-hour Fernet TTL."},
 				{Name: "state_file", Type: "string", Description: "Optional private JSON file used to persist refreshed states."},
+				{Name: "defaults", Type: "object", Description: "Fallback policy for selected auth IDs not listed under credentials."},
 				{Name: "credentials", Type: "object", Description: "Per-auth state, plan, model scope, and baseline configuration."},
 			},
 		},
@@ -261,6 +264,16 @@ func (state *runtimeState) configure(raw []byte) error {
 	if cfg.Credentials == nil {
 		cfg.Credentials = make(map[string]credentialConfig)
 	}
+	if cfg.Defaults != nil {
+		defaults, errNormalize := normalizeCredential(*cfg.Defaults)
+		if errNormalize != nil {
+			return fmt.Errorf("defaults: %w", errNormalize)
+		}
+		if strings.TrimSpace(defaults.State) != "" {
+			return errors.New("defaults.state is not allowed because state must remain isolated per credential")
+		}
+		cfg.Defaults = &defaults
+	}
 
 	current := make(map[string]storedState)
 	for rawAuthID, credential := range cfg.Credentials {
@@ -268,8 +281,11 @@ func (state *runtimeState) configure(raw []byte) error {
 		if authID == "" || authID != rawAuthID {
 			return errors.New("credential IDs must be non-empty and must not have surrounding whitespace")
 		}
-		credential.Plan = strings.ToLower(strings.TrimSpace(credential.Plan))
-		credential.Models = canonicalModels(credential.Models)
+		var errNormalize error
+		credential, errNormalize = normalizeCredential(credential)
+		if errNormalize != nil {
+			return fmt.Errorf("credential %q: %w", authID, errNormalize)
+		}
 		cfg.Credentials[authID] = credential
 		if strings.TrimSpace(credential.State) == "" {
 			continue
@@ -289,7 +305,7 @@ func (state *runtimeState) configure(raw []byte) error {
 		return errLoad
 	}
 	for authID, candidate := range persisted {
-		credential, configured := cfg.Credentials[authID]
+		credential, configured := credentialFor(cfg, authID)
 		if !configured || !normalBlockCount(credential, candidate.Blocks) {
 			continue
 		}
@@ -326,7 +342,7 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 	if !state.accepting {
 		return okEnvelope(requestInterceptResponse{})
 	}
-	credential, exists := state.config.Credentials[authID]
+	credential, exists := credentialFor(state.config, authID)
 	if !exists || !matchesModels(credential.Models, req.Model, req.RequestedModel) {
 		return okEnvelope(requestInterceptResponse{})
 	}
@@ -378,7 +394,7 @@ func (state *runtimeState) captureCandidate(requestID string, headers http.Heade
 	if !exists || !state.accepting {
 		return
 	}
-	credential, exists := state.config.Credentials[binding.AuthID]
+	credential, exists := credentialFor(state.config, binding.AuthID)
 	if !exists || !autoUpdateEnabled(state.config, credential) {
 		return
 	}
@@ -450,7 +466,48 @@ func autoUpdateEnabled(cfg pluginConfig, credential credentialConfig) bool {
 	return true
 }
 
+func credentialFor(cfg pluginConfig, authID string) (credentialConfig, bool) {
+	if credential, exists := cfg.Credentials[authID]; exists {
+		return credential, true
+	}
+	if cfg.Defaults != nil {
+		return *cfg.Defaults, true
+	}
+	return credentialConfig{}, false
+}
+
+func normalizeCredential(credential credentialConfig) (credentialConfig, error) {
+	credential.Plan = strings.ToLower(strings.TrimSpace(credential.Plan))
+	credential.Models = canonicalModels(credential.Models)
+	if credential.NormalBlocks < 0 {
+		return credentialConfig{}, errors.New("normal_blocks must not be negative")
+	}
+	seen := make(map[int]struct{}, len(credential.AcceptedBlocks))
+	accepted := make([]int, 0, len(credential.AcceptedBlocks))
+	for _, blocks := range credential.AcceptedBlocks {
+		if blocks <= 0 || blocks > 1024 {
+			return credentialConfig{}, errors.New("accepted_blocks entries must be between 1 and 1024")
+		}
+		if _, exists := seen[blocks]; exists {
+			continue
+		}
+		seen[blocks] = struct{}{}
+		accepted = append(accepted, blocks)
+	}
+	sort.Ints(accepted)
+	credential.AcceptedBlocks = accepted
+	return credential, nil
+}
+
 func normalBlockCount(credential credentialConfig, blocks int) bool {
+	if len(credential.AcceptedBlocks) > 0 {
+		for _, accepted := range credential.AcceptedBlocks {
+			if blocks == accepted {
+				return true
+			}
+		}
+		return false
+	}
 	want := credential.NormalBlocks
 	if want == 0 {
 		switch strings.ToLower(strings.TrimSpace(credential.Plan)) {

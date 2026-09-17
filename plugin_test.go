@@ -69,6 +69,59 @@ func TestPlanBaselines(t *testing.T) {
 	if normalBlockCount(credentialConfig{Plan: "unknown"}, 10) {
 		t.Fatal("unknown plan must not auto-promote")
 	}
+	policy := credentialConfig{AcceptedBlocks: []int{10, 12}}
+	if !normalBlockCount(policy, 10) || !normalBlockCount(policy, 12) || normalBlockCount(policy, 11) || normalBlockCount(policy, 13) {
+		t.Fatal("accepted block set mismatch")
+	}
+}
+
+func TestDefaultsBootstrapUnknownCredential(t *testing.T) {
+	state := newRuntimeState()
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	state.now = func() time.Time { return now }
+	configureRuntime(t, state, "enabled: true\nauto_update: true\ndefaults:\n  accepted_blocks: [10, 12]\n")
+
+	request := requestInterceptRequest{RequestID: "request-1", ToFormat: "codex", Model: "gpt-5.6-sol", Metadata: map[string]any{"selected_auth_id": "private-auth-id"}}
+	rawRequest, _ := json.Marshal(request)
+	rawResponse, errIntercept := state.interceptAfter(rawRequest)
+	if errIntercept != nil {
+		t.Fatal(errIntercept)
+	}
+	if strings.Contains(string(rawResponse), turnStateHeader) {
+		t.Fatal("first request must not inject before bootstrap")
+	}
+
+	candidate := makeFernetToken(t, now.Add(-time.Minute), 12)
+	rawObserved, _ := json.Marshal(streamChunkInterceptRequest{RequestID: "request-1", ChunkIndex: -1, ResponseHeaders: http.Header{turnStateHeader: {candidate}}})
+	if _, errObserve := state.interceptStreamChunk(rawObserved); errObserve != nil {
+		t.Fatal(errObserve)
+	}
+	rawSucceeded, _ := json.Marshal(requestCompletion{RequestID: "request-1", Outcome: "succeeded"})
+	if _, errComplete := state.complete(rawSucceeded); errComplete != nil {
+		t.Fatal(errComplete)
+	}
+	if got := state.current["private-auth-id"].Value; got != candidate {
+		t.Fatal("default policy did not bootstrap unknown credential")
+	}
+
+	request.RequestID = "request-2"
+	rawRequest, _ = json.Marshal(request)
+	rawResponse, errIntercept = state.interceptAfter(rawRequest)
+	if errIntercept != nil {
+		t.Fatal(errIntercept)
+	}
+	if !strings.Contains(string(rawResponse), candidate) {
+		t.Fatal("bootstrapped state was not injected on the next request")
+	}
+}
+
+func TestDefaultsRejectSharedSeed(t *testing.T) {
+	state := newRuntimeState()
+	seed := makeFernetToken(t, time.Now(), 10)
+	raw, _ := json.Marshal(lifecycleRequest{ConfigYAML: []byte("defaults:\n  accepted_blocks: [10, 12]\n  state: " + seed + "\n"), SchemaVersion: pluginSchema})
+	if errConfigure := state.configure(raw); errConfigure == nil || !strings.Contains(errConfigure.Error(), "defaults.state") {
+		t.Fatalf("expected defaults.state isolation error, got %v", errConfigure)
+	}
 }
 
 func TestInjectAndPromoteOnlyAfterSuccess(t *testing.T) {
