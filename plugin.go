@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.3.0"
+	pluginVersion     = "0.4.1"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -33,6 +33,8 @@ const (
 	methodPluginQuiesce                = "plugin.quiesce"
 	methodPluginReconfigure            = "plugin.reconfigure"
 	methodPluginShutdown               = "plugin.shutdown"
+	methodManagementRegister           = "management.register"
+	methodManagementHandle             = "management.handle"
 	methodRequestInterceptBefore       = "request.intercept_before"
 	methodRequestInterceptAfter        = "request.intercept_after"
 	methodRequestComplete              = "request.complete"
@@ -101,6 +103,8 @@ type runtimeState struct {
 	probing         map[string]bool
 	lastProbe       map[string]time.Time
 	probeResults    map[string]string
+	history         []historyEntry
+	accounts        accountCache
 	poolCursor      uint64
 	fetch           func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
 	workerDone      chan struct{}
@@ -122,6 +126,7 @@ func newRuntimeState() *runtimeState {
 		probing:         make(map[string]bool),
 		lastProbe:       make(map[string]time.Time),
 		probeResults:    make(map[string]string),
+		history:         make([]historyEntry, 0, historyLimit),
 		refreshRequests: make(map[string]string),
 		probeReasons:    make(map[string]string),
 		blockedUntil:    make(map[string]time.Time),
@@ -219,10 +224,10 @@ type requestCompletion struct {
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
-	case "management.register":
-		return okEnvelope(map[string]any{"routes": []any{map[string]string{"Method": "GET", "Path": "/codex-turn-state/status"}}})
-	case "management.handle":
-		return runtime.statusResponse()
+	case methodManagementRegister:
+		return okEnvelope(managementRegistration())
+	case methodManagementHandle:
+		return runtime.handleManagement(request)
 	case methodPluginRegister, methodPluginReconfigure:
 		if errConfigure := runtime.configure(request); errConfigure != nil {
 			return nil, errConfigure
