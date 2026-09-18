@@ -102,6 +102,9 @@ func (state *runtimeState) refreshDue(ctx context.Context) {
 
 func (state *runtimeState) nextRefreshLocked(key string) time.Time {
 	due := state.now()
+	if enabledByDefault(state.config.Probe.ProbeOnErrorsOnly) && state.refreshRequests[key] == "" {
+		return due.Add(365 * 24 * time.Hour)
+	}
 	if current := state.current[key]; current.Value != "" && state.refreshRequests[key] == "" {
 		due = current.IssuedAt.Add(turnStateTTL - time.Duration(state.config.Probe.RefreshBeforeSeconds)*time.Second)
 	}

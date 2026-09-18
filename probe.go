@@ -24,6 +24,7 @@ type probeConfig struct {
 	MaxAttempts          int             `yaml:"max_attempts"`
 	BackgroundRefresh    *bool           `yaml:"background_refresh"`
 	RefreshOnErrors      *bool           `yaml:"refresh_on_errors"`
+	ProbeOnErrorsOnly    *bool           `yaml:"probe_on_errors_only"`
 	QuotaBackoffSeconds  int             `yaml:"quota_backoff_seconds"`
 }
 
@@ -139,11 +140,19 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	current := state.current[key]
 	reason := state.refreshRequests[key]
+	if enabledByDefault(cfg.Probe.ProbeOnErrorsOnly) && reason == "" {
+		state.mu.Unlock()
+		return
+	}
 	if reason == "" && current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(current.IssuedAt.Add(turnStateTTL-time.Duration(cfg.Probe.RefreshBeforeSeconds)*time.Second)) {
 		state.mu.Unlock()
 		return
 	}
 	if now.Before(state.blockedUntil[key]) {
+		state.mu.Unlock()
+		return
+	}
+	if now.Before(state.accountBlockedUntil[authID]) {
 		state.mu.Unlock()
 		return
 	}
@@ -172,19 +181,40 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	outcome := "auth_unavailable"
 	if err == nil {
 		outcome = "probe_failed"
-		for attempt := 0; attempt < cfg.Probe.MaxAttempts && ctx.Err() == nil; attempt++ {
+		attempts := 0
+		poolSize := len(cfg.Probe.ProxyPool)
+		for offset := 0; offset < poolSize && attempts < cfg.Probe.MaxAttempts && ctx.Err() == nil; offset++ {
+			endpointIndex := (int(start) + offset) % poolSize
+			state.mu.Lock()
+			cooling := state.now().Before(state.proxyBlockedUntil[endpointIndex])
+			state.mu.Unlock()
+			if cooling {
+				continue
+			}
+			attempts++
 			// All attempts share one total deadline; none can escape the chain.
-			endpoint := cfg.Probe.ProxyPool[(int(start)+attempt)%len(cfg.Probe.ProxyPool)]
+			endpoint := cfg.Probe.ProxyPool[endpointIndex]
 			attemptCtx, attemptCancel := context.WithTimeout(ctx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second/time.Duration(cfg.Probe.MaxAttempts))
 			value, status := state.fetch(attemptCtx, auth, model, cfg.Probe.FirstProxy, endpoint)
 			attemptCancel()
 			outcome = status
 			if status != "ok" {
-				if strings.Contains(status, "usage_limit_reached") || strings.Contains(status, "insufficient_quota") {
+				if accountLevelProbeFailure(status) {
+					state.mu.Lock()
+					state.accountBlockedUntil[authID] = state.now().Add(probeAccountBackoff(status, cfg.Probe.QuotaBackoffSeconds))
+					state.mu.Unlock()
 					break
+				}
+				if proxyLevelProbeFailure(status) {
+					state.mu.Lock()
+					state.proxyBlockedUntil[endpointIndex] = state.now().Add(time.Duration(cfg.Probe.RetrySeconds) * time.Second)
+					state.mu.Unlock()
 				}
 				continue
 			}
+			state.mu.Lock()
+			delete(state.proxyBlockedUntil, endpointIndex)
+			state.mu.Unlock()
 			parsed, parseErr := parseTurnState(value, cfg.MaxStateBytes)
 			if parseErr != nil || !normalBlockCount(policy, parsed.Blocks) || parsed.IssuedAt.After(now.Add(5*time.Minute)) || !now.Before(parsed.IssuedAt.Add(turnStateTTL)) {
 				outcome = "state_rejected"
@@ -220,6 +250,8 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		Reason:  reason,
 	})
 	if promoted {
+		delete(state.accountBlockedUntil, authID)
+		state.forceInject[key] = true
 		state.appendHistoryLocked(historyEntry{
 			At:      state.now(),
 			Account: accountDigest(authID),
@@ -307,6 +339,31 @@ func fetchProbe(ctx context.Context, auth probeAuth, model string, first *proxyE
 func httpStatus(status int) string {
 	b, _ := json.Marshal(status)
 	return string(b)
+}
+
+// Account-level failures are deterministic for the selected credential; trying
+// another exit proxy cannot repair them and only spends more quota.
+func accountLevelProbeFailure(status string) bool {
+	return strings.Contains(status, "upstream_http_401") ||
+		strings.Contains(status, "upstream_http_403") ||
+		strings.Contains(status, "upstream_http_429") ||
+		strings.Contains(status, "usage_limit_reached") ||
+		strings.Contains(status, "rate_limit_exceeded") ||
+		strings.Contains(status, "insufficient_quota") ||
+		strings.Contains(status, "invalid_api_key")
+}
+
+func probeAccountBackoff(status string, quotaSeconds int) time.Duration {
+	if strings.Contains(status, "usage_limit_reached") || strings.Contains(status, "rate_limit_exceeded") || strings.Contains(status, "insufficient_quota") {
+		return time.Duration(quotaSeconds) * time.Second
+	}
+	return time.Minute
+}
+
+// Transport/proxy failures are isolated to the selected pool entry. Upstream
+// 5xx remains retryable across exits without poisoning a proxy that may be fine.
+func proxyLevelProbeFailure(status string) bool {
+	return status == "network_error" || strings.Contains(status, "proxy") || strings.Contains(status, "connect") || strings.Contains(status, "tls")
 }
 
 func probeCompleted(reader io.Reader) bool {

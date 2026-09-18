@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -24,6 +25,20 @@ func boolPointer(value bool) *bool { return &value }
 
 func configureRuntime(t *testing.T, state *runtimeState, yamlConfig string) {
 	t.Helper()
+	// Existing unit cases exercise the legacy eager-probe/inject behavior;
+	// production configs without these fields use the safer error-only default.
+	if !strings.Contains(yamlConfig, "probe_on_errors_only:") {
+		if strings.Contains(yamlConfig, "\nprobe:\n") {
+			yamlConfig = strings.Replace(yamlConfig, "\nprobe:\n", "\nprobe:\n  probe_on_errors_only: false\n", 1)
+		} else if strings.HasPrefix(yamlConfig, "probe:\n") {
+			yamlConfig = strings.Replace(yamlConfig, "probe:\n", "probe:\n  probe_on_errors_only: false\n", 1)
+		} else {
+			yamlConfig += "\nprobe:\n  probe_on_errors_only: false\n"
+		}
+	}
+	if !strings.Contains(yamlConfig, "inject_on_errors_only:") {
+		yamlConfig += "\ninject_on_errors_only: false\n"
+	}
 	t.Cleanup(state.shutdown)
 	raw, errMarshal := json.Marshal(lifecycleRequest{ConfigYAML: []byte(yamlConfig), SchemaVersion: pluginSchema})
 	if errMarshal != nil {
@@ -113,6 +128,45 @@ func TestDefaultsBootstrapUnknownCredential(t *testing.T) {
 	}
 	if !strings.Contains(string(rawResponse), candidate) {
 		t.Fatal("bootstrapped state was not injected on the next request")
+	}
+}
+
+func TestErrorOnlyModeSkipsNormalProbeAndInjection(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	token := makeFernetToken(t, now, 10)
+	t.Cleanup(state.shutdown)
+	rawConfig := `enabled: true
+defaults:
+  accepted_blocks: [10]
+probe:
+  enabled: true
+  background_refresh: false
+  proxy_pool:
+    - url: http://proxy.invalid:1
+credentials:
+  auth-a:
+    accepted_blocks: [10]
+    state_model: model-a
+    state: ` + token + "\n"
+	rawLifecycle, _ := json.Marshal(lifecycleRequest{ConfigYAML: []byte(rawConfig), SchemaVersion: pluginSchema})
+	if err := state.configure(rawLifecycle); err != nil {
+		t.Fatal(err)
+	}
+	state.fetch = func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string) {
+		t.Fatal("normal account must not be probed")
+		return "", "network_error"
+	}
+	raw, _ := json.Marshal(requestInterceptRequest{RequestID: "normal", ToFormat: "codex", Model: "model-a", Metadata: map[string]any{"selected_auth_id": "auth-a"}})
+	response, _ := state.interceptAfter(raw)
+	if strings.Contains(string(response), token) {
+		t.Fatal("normal account unexpectedly received state injection")
+	}
+	_, _ = state.complete([]byte(`{"RequestID":"normal","Outcome":"failed","StatusCode":429}`))
+	if state.forceInject[stateKey("auth-a", "model-a")] {
+		t.Fatal("429 must wait for a newly probed state before injection")
 	}
 }
 

@@ -32,11 +32,13 @@ plugins:
       priority: 100
       auto_update: true
       inject_expired: false
+      inject_on_errors_only: true
       state_file: "state/codex-turn-state-v2.json"
       defaults:
         accepted_blocks: [10, 12]
       probe:
         enabled: true
+        probe_on_errors_only: true
         background_refresh: true
         refresh_on_errors: true
         quota_backoff_seconds: 900

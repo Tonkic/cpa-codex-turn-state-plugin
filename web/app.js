@@ -468,6 +468,25 @@
     return typeof value === 'string' ? value.trim() : '';
   }
 
+  // CPAMP embeds this resource cross-origin, so its localStorage is not
+  // visible here. Ask the parent for an in-memory key instead of putting it in
+  // the iframe URL or persisting it in this page.
+  function requestParentManagementKey() {
+    try {
+      if (window.parent !== window) {
+        window.parent.postMessage({ type: 'codex-turn-state:request-management-key' }, '*');
+      }
+    } catch (error) { /* standalone resource */ }
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent || !event.data || event.data.type !== 'codex-turn-state:management-key') return;
+    var value = event.data.managementKey;
+    if (typeof value !== 'string' || value.trim() === '') return;
+    key = value.trim();
+    connect();
+  });
+
   // --- transport -------------------------------------------------------------
 
   function derivedBase() {
@@ -1058,8 +1077,10 @@
   }
 
   function connect() {
-    key = readManagementKey();
+    var localKey = readManagementKey();
+    if (localKey) key = localKey;
     if (!key) {
+      requestParentManagementKey();
       showNotice(t('noticeKeyMissing') + ' ' + t('noticeBody'));
       return;
     }

@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.4.1"
+	pluginVersion     = "0.4.2"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -43,15 +43,16 @@ const (
 )
 
 type pluginConfig struct {
-	Enabled       bool                        `yaml:"enabled"`
-	Priority      int                         `yaml:"priority"`
-	AutoUpdate    *bool                       `yaml:"auto_update"`
-	InjectExpired bool                        `yaml:"inject_expired"`
-	StateFile     string                      `yaml:"state_file"`
-	MaxStateBytes int                         `yaml:"max_state_bytes"`
-	Defaults      *credentialConfig           `yaml:"defaults"`
-	Credentials   map[string]credentialConfig `yaml:"credentials"`
-	Probe         probeConfig                 `yaml:"probe"`
+	Enabled            bool                        `yaml:"enabled"`
+	Priority           int                         `yaml:"priority"`
+	AutoUpdate         *bool                       `yaml:"auto_update"`
+	InjectExpired      bool                        `yaml:"inject_expired"`
+	InjectOnErrorsOnly *bool                       `yaml:"inject_on_errors_only"`
+	StateFile          string                      `yaml:"state_file"`
+	MaxStateBytes      int                         `yaml:"max_state_bytes"`
+	Defaults           *credentialConfig           `yaml:"defaults"`
+	Credentials        map[string]credentialConfig `yaml:"credentials"`
+	Probe              probeConfig                 `yaml:"probe"`
 }
 
 type credentialConfig struct {
@@ -88,48 +89,54 @@ type stateCandidate struct {
 }
 
 type runtimeState struct {
-	mu              sync.Mutex
-	persistMu       sync.Mutex
-	now             func() time.Time
-	accepting       bool
-	config          pluginConfig
-	current         map[string]storedState
-	requests        map[string]requestBinding
-	candidates      map[string]stateCandidate
-	hostCall        func(string, any, any) error
-	probeCtx        context.Context
-	probeCancel     context.CancelFunc
-	generation      uint64
-	probing         map[string]bool
-	lastProbe       map[string]time.Time
-	probeResults    map[string]string
-	history         []historyEntry
-	accounts        accountCache
-	poolCursor      uint64
-	fetch           func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
-	workerDone      chan struct{}
-	wake            chan struct{}
-	refreshRequests map[string]string
-	probeReasons    map[string]string
-	blockedUntil    map[string]time.Time
+	mu                  sync.Mutex
+	persistMu           sync.Mutex
+	now                 func() time.Time
+	accepting           bool
+	config              pluginConfig
+	current             map[string]storedState
+	requests            map[string]requestBinding
+	candidates          map[string]stateCandidate
+	hostCall            func(string, any, any) error
+	probeCtx            context.Context
+	probeCancel         context.CancelFunc
+	generation          uint64
+	probing             map[string]bool
+	lastProbe           map[string]time.Time
+	probeResults        map[string]string
+	history             []historyEntry
+	accounts            accountCache
+	poolCursor          uint64
+	fetch               func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
+	workerDone          chan struct{}
+	wake                chan struct{}
+	refreshRequests     map[string]string
+	probeReasons        map[string]string
+	blockedUntil        map[string]time.Time
+	accountBlockedUntil map[string]time.Time
+	proxyBlockedUntil   map[int]time.Time
+	forceInject         map[string]bool
 }
 
 var runtime = newRuntimeState()
 
 func newRuntimeState() *runtimeState {
 	return &runtimeState{
-		now:             time.Now,
-		fetch:           fetchProbe,
-		current:         make(map[string]storedState),
-		requests:        make(map[string]requestBinding),
-		candidates:      make(map[string]stateCandidate),
-		probing:         make(map[string]bool),
-		lastProbe:       make(map[string]time.Time),
-		probeResults:    make(map[string]string),
-		history:         make([]historyEntry, 0, historyLimit),
-		refreshRequests: make(map[string]string),
-		probeReasons:    make(map[string]string),
-		blockedUntil:    make(map[string]time.Time),
+		now:                 time.Now,
+		fetch:               fetchProbe,
+		current:             make(map[string]storedState),
+		requests:            make(map[string]requestBinding),
+		candidates:          make(map[string]stateCandidate),
+		probing:             make(map[string]bool),
+		lastProbe:           make(map[string]time.Time),
+		probeResults:        make(map[string]string),
+		history:             make([]historyEntry, 0, historyLimit),
+		refreshRequests:     make(map[string]string),
+		probeReasons:        make(map[string]string),
+		blockedUntil:        make(map[string]time.Time),
+		accountBlockedUntil: make(map[string]time.Time),
+		proxyBlockedUntil:   make(map[int]time.Time),
+		forceInject:         make(map[string]bool),
 	}
 }
 
@@ -265,6 +272,7 @@ func pluginRegistration() registration {
 			ConfigFields: []configField{
 				{Name: "auto_update", Type: "boolean", Description: "Promote a newer normal Fernet state after a successful request."},
 				{Name: "inject_expired", Type: "boolean", Description: "Allow injection after the one-hour Fernet TTL."},
+				{Name: "inject_on_errors_only", Type: "boolean", Description: "Only inject a cached state after this auth/model has triggered a refreshable upstream error; defaults to true."},
 				{Name: "state_file", Type: "string", Description: "Optional private JSON file used to persist refreshed states."},
 				{Name: "defaults", Type: "object", Description: "Fallback policy for selected auth IDs not listed under credentials."},
 				{Name: "credentials", Type: "object", Description: "Per-auth state, plan, model scope, and baseline configuration."},
@@ -378,6 +386,9 @@ func (state *runtimeState) configure(raw []byte) error {
 	state.refreshRequests = make(map[string]string)
 	state.probeReasons = make(map[string]string)
 	state.blockedUntil = make(map[string]time.Time)
+	state.accountBlockedUntil = make(map[string]time.Time)
+	state.proxyBlockedUntil = make(map[int]time.Time)
+	state.forceInject = make(map[string]bool)
 	// Preserve in-memory states on hot reconfiguration even without a state file.
 	for key, candidate := range state.current {
 		authID, model := splitStateKey(key)
@@ -443,6 +454,9 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
 	}
 	if current.IssuedAt.After(state.now().Add(5*time.Minute)) || (!state.config.InjectExpired && !state.now().Before(current.IssuedAt.Add(turnStateTTL))) {
+		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
+	}
+	if enabledByDefault(state.config.InjectOnErrorsOnly) && !state.forceInject[key] {
 		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
 	}
 	return okEnvelope(requestInterceptResponse{Headers: http.Header{turnStateHeader: {current.Value}}})
@@ -511,10 +525,14 @@ func (state *runtimeState) complete(raw []byte) ([]byte, error) {
 
 	state.mu.Lock()
 	candidate, hasCandidate := state.candidates[completion.RequestID]
-	if binding, ok := state.requests[completion.RequestID]; ok && completion.Outcome == "failed" {
+	binding, hasBinding := state.requests[completion.RequestID]
+	if hasBinding && completion.Outcome == "failed" {
 		if reason := failureRefreshReason(completion.StatusCode, completion.Error); reason != "" {
 			state.queueRefreshLocked(binding.Key, reason)
 		}
+	}
+	if hasBinding && completion.Outcome == "succeeded" {
+		delete(state.forceInject, binding.Key)
 	}
 	delete(state.candidates, completion.RequestID)
 	delete(state.requests, completion.RequestID)
