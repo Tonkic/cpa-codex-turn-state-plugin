@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.1.1"
+	pluginVersion     = "0.2.0"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -48,6 +49,7 @@ type pluginConfig struct {
 	MaxStateBytes int                         `yaml:"max_state_bytes"`
 	Defaults      *credentialConfig           `yaml:"defaults"`
 	Credentials   map[string]credentialConfig `yaml:"credentials"`
+	Probe         probeConfig                 `yaml:"probe"`
 }
 
 type credentialConfig struct {
@@ -55,6 +57,7 @@ type credentialConfig struct {
 	NormalBlocks   int      `yaml:"normal_blocks"`
 	AcceptedBlocks []int    `yaml:"accepted_blocks"`
 	State          string   `yaml:"state"`
+	StateModel     string   `yaml:"state_model"`
 	Models         []string `yaml:"models"`
 	AutoUpdate     *bool    `yaml:"auto_update"`
 }
@@ -72,32 +75,47 @@ type persistedFile struct {
 
 type requestBinding struct {
 	AuthID string
+	Key    string
 }
 
 type stateCandidate struct {
 	AuthID string
+	Key    string
 	State  storedState
 }
 
 type runtimeState struct {
-	mu         sync.Mutex
-	persistMu  sync.Mutex
-	now        func() time.Time
-	accepting  bool
-	config     pluginConfig
-	current    map[string]storedState
-	requests   map[string]requestBinding
-	candidates map[string]stateCandidate
+	mu           sync.Mutex
+	persistMu    sync.Mutex
+	now          func() time.Time
+	accepting    bool
+	config       pluginConfig
+	current      map[string]storedState
+	requests     map[string]requestBinding
+	candidates   map[string]stateCandidate
+	hostCall     func(string, any, any) error
+	probeCtx     context.Context
+	probeCancel  context.CancelFunc
+	generation   uint64
+	probing      map[string]bool
+	lastProbe    map[string]time.Time
+	probeResults map[string]string
+	poolCursor   uint64
+	fetch        func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
 }
 
 var runtime = newRuntimeState()
 
 func newRuntimeState() *runtimeState {
 	return &runtimeState{
-		now:        time.Now,
-		current:    make(map[string]storedState),
-		requests:   make(map[string]requestBinding),
-		candidates: make(map[string]stateCandidate),
+		now:          time.Now,
+		fetch:        fetchProbe,
+		current:      make(map[string]storedState),
+		requests:     make(map[string]requestBinding),
+		candidates:   make(map[string]stateCandidate),
+		probing:      make(map[string]bool),
+		lastProbe:    make(map[string]time.Time),
+		probeResults: make(map[string]string),
 	}
 }
 
@@ -139,6 +157,7 @@ type configField struct {
 }
 
 type registrationCapability struct {
+	ManagementAPI          bool `json:"management_api"`
 	RequestInterceptor     bool `json:"request_interceptor"`
 	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 	ResponseInterceptor    bool `json:"response_interceptor"`
@@ -159,7 +178,8 @@ type requestInterceptRequest struct {
 }
 
 type requestInterceptResponse struct {
-	Headers http.Header `json:"Headers,omitempty"`
+	Headers      http.Header `json:"Headers,omitempty"`
+	ClearHeaders []string    `json:"ClearHeaders,omitempty"`
 }
 
 type responseInterceptRequest struct {
@@ -187,6 +207,10 @@ type requestCompletion struct {
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
+	case "management.register":
+		return okEnvelope(map[string]any{"routes": []any{map[string]string{"Method": "GET", "Path": "/codex-turn-state/status"}}})
+	case "management.handle":
+		return runtime.statusResponse()
 	case methodPluginRegister, methodPluginReconfigure:
 		if errConfigure := runtime.configure(request); errConfigure != nil {
 			return nil, errConfigure
@@ -227,9 +251,11 @@ func pluginRegistration() registration {
 				{Name: "state_file", Type: "string", Description: "Optional private JSON file used to persist refreshed states."},
 				{Name: "defaults", Type: "object", Description: "Fallback policy for selected auth IDs not listed under credentials."},
 				{Name: "credentials", Type: "object", Description: "Per-auth state, plan, model scope, and baseline configuration."},
+				{Name: "probe", Type: "object", Description: "On-demand state acquisition using an isolated HTTP/SOCKS proxy pool and optional first hop."},
 			},
 		},
 		Capabilities: registrationCapability{
+			ManagementAPI:          true,
 			RequestInterceptor:     true,
 			RequestLifecyclePlugin: true,
 			ResponseInterceptor:    true,
@@ -264,6 +290,9 @@ func (state *runtimeState) configure(raw []byte) error {
 	if cfg.Credentials == nil {
 		cfg.Credentials = make(map[string]credentialConfig)
 	}
+	if err := normalizeProbe(&cfg.Probe); err != nil {
+		return err
+	}
 	if cfg.Defaults != nil {
 		defaults, errNormalize := normalizeCredential(*cfg.Defaults)
 		if errNormalize != nil {
@@ -290,6 +319,9 @@ func (state *runtimeState) configure(raw []byte) error {
 		if strings.TrimSpace(credential.State) == "" {
 			continue
 		}
+		if credential.StateModel == "" || strings.Contains(credential.StateModel, "*") {
+			return errors.New("a seed state requires an exact state_model; cross-model seeds are unsafe")
+		}
 		parsed, errParse := parseTurnState(credential.State, cfg.MaxStateBytes)
 		if errParse != nil {
 			return fmt.Errorf("credential %q state: %w", authID, errParse)
@@ -297,25 +329,42 @@ func (state *runtimeState) configure(raw []byte) error {
 		if !normalBlockCount(credential, parsed.Blocks) {
 			return fmt.Errorf("credential %q state has %d blocks, which does not match its normal baseline", authID, parsed.Blocks)
 		}
-		current[authID] = storedState{Value: strings.TrimSpace(credential.State), IssuedAt: parsed.IssuedAt, Blocks: parsed.Blocks}
+		current[stateKey(authID, credential.StateModel)] = storedState{Value: strings.TrimSpace(credential.State), IssuedAt: parsed.IssuedAt, Blocks: parsed.Blocks}
 	}
 
 	persisted, errLoad := loadPersisted(cfg.StateFile, cfg.MaxStateBytes)
 	if errLoad != nil {
 		return errLoad
 	}
-	for authID, candidate := range persisted {
+	for key, candidate := range persisted {
+		authID, model := splitStateKey(key)
 		credential, configured := credentialFor(cfg, authID)
-		if !configured || !normalBlockCount(credential, candidate.Blocks) {
+		if !configured || model == "" || !matchesModels(credential.Models, model) || !normalBlockCount(credential, candidate.Blocks) {
 			continue
 		}
-		if existing, exists := current[authID]; !exists || candidate.IssuedAt.After(existing.IssuedAt) {
-			current[authID] = candidate
+		if existing, exists := current[key]; !exists || candidate.IssuedAt.After(existing.IssuedAt) {
+			current[key] = candidate
 		}
 	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.probeCancel != nil {
+		state.probeCancel()
+	}
+	state.generation++
+	state.probeCtx, state.probeCancel = context.WithCancel(context.Background())
+	state.probing = make(map[string]bool)
+	state.lastProbe = make(map[string]time.Time)
+	state.probeResults = make(map[string]string)
+	// Preserve in-memory states on hot reconfiguration even without a state file.
+	for key, candidate := range state.current {
+		authID, model := splitStateKey(key)
+		policy, ok := credentialFor(cfg, authID)
+		if ok && model != "" && matchesModels(policy.Models, model) && normalBlockCount(policy, candidate.Blocks) && candidate.IssuedAt.After(current[key].IssuedAt) {
+			current[key] = candidate
+		}
+	}
 	state.config = cfg
 	state.current = current
 	state.requests = make(map[string]requestBinding)
@@ -329,6 +378,12 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode after-auth request: %w", errUnmarshal)
 	}
+	// Retries can also switch to an unmanaged credential/provider. Never retain
+	// a previous attempt's candidate just because this attempt is out of scope.
+	state.mu.Lock()
+	delete(state.requests, req.RequestID)
+	delete(state.candidates, req.RequestID)
+	state.mu.Unlock()
 	if !strings.EqualFold(strings.TrimSpace(req.ToFormat), "codex") {
 		return okEnvelope(requestInterceptResponse{})
 	}
@@ -336,6 +391,12 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 	if authID == "" {
 		return okEnvelope(requestInterceptResponse{})
 	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		return okEnvelope(requestInterceptResponse{})
+	}
+	key := stateKey(authID, model)
+	state.ensureProbe(authID, model)
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -350,14 +411,14 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 		// A host retry may reuse the request ID with another credential. Discard any
 		// candidate from the previous attempt before binding the new selected auth.
 		delete(state.candidates, req.RequestID)
-		state.requests[req.RequestID] = requestBinding{AuthID: authID}
+		state.requests[req.RequestID] = requestBinding{AuthID: authID, Key: key}
 	}
-	current, exists := state.current[authID]
+	current, exists := state.current[key]
 	if !exists {
-		return okEnvelope(requestInterceptResponse{})
+		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
 	}
-	if !state.config.InjectExpired && !state.now().Before(current.IssuedAt.Add(turnStateTTL)) {
-		return okEnvelope(requestInterceptResponse{})
+	if current.IssuedAt.After(state.now().Add(5*time.Minute)) || (!state.config.InjectExpired && !state.now().Before(current.IssuedAt.Add(turnStateTTL))) {
+		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
 	}
 	return okEnvelope(requestInterceptResponse{Headers: http.Header{turnStateHeader: {current.Value}}})
 }
@@ -402,14 +463,15 @@ func (state *runtimeState) captureCandidate(requestID string, headers http.Heade
 	if errParse != nil || !normalBlockCount(credential, parsed.Blocks) {
 		return
 	}
-	if parsed.IssuedAt.After(state.now().Add(5 * time.Minute)) {
+	if parsed.IssuedAt.After(state.now().Add(5*time.Minute)) || !state.now().Before(parsed.IssuedAt.Add(turnStateTTL)) {
 		return
 	}
-	if existing, existsCurrent := state.current[binding.AuthID]; existsCurrent && !parsed.IssuedAt.After(existing.IssuedAt) {
+	if existing, existsCurrent := state.current[binding.Key]; existsCurrent && !parsed.IssuedAt.After(existing.IssuedAt) {
 		return
 	}
 	state.candidates[requestID] = stateCandidate{
 		AuthID: binding.AuthID,
+		Key:    binding.Key,
 		State:  storedState{Value: value, IssuedAt: parsed.IssuedAt, Blocks: parsed.Blocks},
 	}
 }
@@ -425,9 +487,9 @@ func (state *runtimeState) complete(raw []byte) ([]byte, error) {
 	delete(state.candidates, completion.RequestID)
 	delete(state.requests, completion.RequestID)
 	promoted := false
-	if hasCandidate && completion.Outcome == "succeeded" {
-		if existing, exists := state.current[candidate.AuthID]; !exists || candidate.State.IssuedAt.After(existing.IssuedAt) {
-			state.current[candidate.AuthID] = candidate.State
+	if hasCandidate && state.accepting && completion.Outcome == "succeeded" && state.now().Before(candidate.State.IssuedAt.Add(turnStateTTL)) {
+		if existing, exists := state.current[candidate.Key]; !exists || candidate.State.IssuedAt.After(existing.IssuedAt) {
+			state.current[candidate.Key] = candidate.State
 			promoted = true
 		}
 	}
@@ -446,12 +508,19 @@ func (state *runtimeState) setAccepting(accepting bool) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.accepting = accepting
+	if !accepting && state.probeCancel != nil {
+		state.probeCancel()
+	}
 }
 
 func (state *runtimeState) shutdown() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.accepting = false
+	if state.probeCancel != nil {
+		state.probeCancel()
+	}
+	state.generation++
 	state.requests = make(map[string]requestBinding)
 	state.candidates = make(map[string]stateCandidate)
 }
@@ -479,6 +548,7 @@ func credentialFor(cfg pluginConfig, authID string) (credentialConfig, bool) {
 func normalizeCredential(credential credentialConfig) (credentialConfig, error) {
 	credential.Plan = strings.ToLower(strings.TrimSpace(credential.Plan))
 	credential.Models = canonicalModels(credential.Models)
+	credential.StateModel = strings.TrimSpace(credential.StateModel)
 	if credential.NormalBlocks < 0 {
 		return credentialConfig{}, errors.New("normal_blocks must not be negative")
 	}
@@ -596,7 +666,11 @@ func loadPersisted(path string, maxBytes int) (map[string]storedState, error) {
 	if errUnmarshal := json.Unmarshal(raw, &file); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode state file: %w", errUnmarshal)
 	}
-	if file.Version != 1 {
+	// Legacy states have no model identity and cannot safely be reused.
+	if file.Version == 1 {
+		return nil, nil
+	}
+	if file.Version != 2 {
 		return nil, fmt.Errorf("unsupported state file version %d", file.Version)
 	}
 	out := make(map[string]storedState, len(file.Credentials))
@@ -619,6 +693,10 @@ func (state *runtimeState) persistCurrent(path string) error {
 	state.persistMu.Lock()
 	defer state.persistMu.Unlock()
 	state.mu.Lock()
+	if path != state.config.StateFile {
+		state.mu.Unlock()
+		return nil
+	}
 	snapshot := cloneStoredStates(state.current)
 	state.mu.Unlock()
 	return persistStates(path, snapshot)
@@ -632,7 +710,7 @@ func persistStates(path string, states map[string]storedState) error {
 	if errMkdir := os.MkdirAll(filepath.Dir(path), 0o700); errMkdir != nil {
 		return fmt.Errorf("create state directory: %w", errMkdir)
 	}
-	raw, errMarshal := json.MarshalIndent(persistedFile{Version: 1, Credentials: states}, "", "  ")
+	raw, errMarshal := json.MarshalIndent(persistedFile{Version: 2, Credentials: states}, "", "  ")
 	if errMarshal != nil {
 		return fmt.Errorf("encode state file: %w", errMarshal)
 	}
@@ -676,6 +754,19 @@ func cloneStoredStates(source map[string]storedState) map[string]storedState {
 		out[key] = value
 	}
 	return out
+}
+
+func stateKey(authID, model string) string {
+	raw, _ := json.Marshal([2]string{authID, strings.TrimSpace(model)})
+	return string(raw)
+}
+
+func splitStateKey(key string) (string, string) {
+	var pair [2]string
+	if json.Unmarshal([]byte(key), &pair) != nil {
+		return "", ""
+	}
+	return pair[0], pair[1]
 }
 
 func okEnvelope(value any) ([]byte, error) {

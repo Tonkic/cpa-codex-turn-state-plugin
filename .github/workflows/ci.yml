@@ -26,6 +26,9 @@ jobs:
       - name: Build Windows plugin
         shell: pwsh
         run: ./scripts/build-windows.ps1
+      - name: Native DLL ABI smoke
+        shell: pwsh
+        run: python scripts/smoke-dll.py
       - name: Verify plugin export
         shell: pwsh
         run: |

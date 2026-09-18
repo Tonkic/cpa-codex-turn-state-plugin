@@ -1,0 +1,24 @@
+# Merge this block into CPA config.yaml. Secrets are intentionally absent.
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    cpa-codex-turn-state:
+      enabled: true
+      priority: 100
+      auto_update: true
+      inject_expired: false
+      state_file: state/codex-turn-state-v2.json
+      defaults:
+        accepted_blocks: [10, 12]
+      probe:
+        enabled: true
+        timeout_seconds: 15
+        retry_seconds: 60
+        refresh_before_seconds: 300
+        max_attempts: 1
+        first_proxy:
+          url: socks5h://127.0.0.1:1080
+        proxy_pool:
+          - url_file: state/proxy-pool.url
+            connect_host: proxy.example.invalid:8080

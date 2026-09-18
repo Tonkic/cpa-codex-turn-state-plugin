@@ -87,7 +87,7 @@ func TestDefaultsBootstrapUnknownCredential(t *testing.T) {
 	if errIntercept != nil {
 		t.Fatal(errIntercept)
 	}
-	if strings.Contains(string(rawResponse), turnStateHeader) {
+	if strings.Contains(string(rawResponse), `"Headers"`) {
 		t.Fatal("first request must not inject before bootstrap")
 	}
 
@@ -100,7 +100,7 @@ func TestDefaultsBootstrapUnknownCredential(t *testing.T) {
 	if _, errComplete := state.complete(rawSucceeded); errComplete != nil {
 		t.Fatal(errComplete)
 	}
-	if got := state.current["private-auth-id"].Value; got != candidate {
+	if got := state.current[stateKey("private-auth-id", "gpt-5.6-sol")].Value; got != candidate {
 		t.Fatal("default policy did not bootstrap unknown credential")
 	}
 
@@ -130,7 +130,7 @@ func TestInjectAndPromoteOnlyAfterSuccess(t *testing.T) {
 	state.now = func() time.Time { return now }
 	seed := makeFernetToken(t, now.Add(-30*time.Minute), 10)
 	candidate := makeFernetToken(t, now.Add(-10*time.Minute), 10)
-	configureRuntime(t, state, "enabled: true\nauto_update: true\ncredentials:\n  auth-1:\n    plan: plus\n    state: "+seed+"\n    models: [gpt-5.6-*]\n")
+	configureRuntime(t, state, "enabled: true\nauto_update: true\ncredentials:\n  auth-1:\n    plan: plus\n    state_model: gpt-5.6-sol\n    state: "+seed+"\n    models: [gpt-5.6-*]\n")
 
 	request := requestInterceptRequest{
 		RequestID:      "request-1",
@@ -164,7 +164,7 @@ func TestInjectAndPromoteOnlyAfterSuccess(t *testing.T) {
 	if _, errComplete := state.complete(rawFailed); errComplete != nil {
 		t.Fatal(errComplete)
 	}
-	if got := state.current["auth-1"].Value; got != seed {
+	if got := state.current[stateKey("auth-1", "gpt-5.6-sol")].Value; got != seed {
 		t.Fatal("failed request promoted candidate")
 	}
 
@@ -181,7 +181,7 @@ func TestInjectAndPromoteOnlyAfterSuccess(t *testing.T) {
 	if _, errComplete := state.complete(rawSucceeded); errComplete != nil {
 		t.Fatal(errComplete)
 	}
-	if got := state.current["auth-1"].Value; got != candidate {
+	if got := state.current[stateKey("auth-1", "gpt-5.6-sol")].Value; got != candidate {
 		t.Fatal("successful request did not promote candidate")
 	}
 }
@@ -192,7 +192,7 @@ func TestRejectsAbnormalCandidateAndExpiredInjection(t *testing.T) {
 	state.now = func() time.Time { return now }
 	seed := makeFernetToken(t, now.Add(-2*time.Hour), 10)
 	abnormal := makeFernetToken(t, now.Add(-5*time.Minute), 11)
-	configureRuntime(t, state, "enabled: true\ncredentials:\n  auth-1:\n    plan: pro\n    state: "+seed+"\n")
+	configureRuntime(t, state, "enabled: true\ncredentials:\n  auth-1:\n    plan: pro\n    state_model: gpt-5.6-sol\n    state: "+seed+"\n")
 
 	request := requestInterceptRequest{RequestID: "request-1", ToFormat: "codex", Model: "gpt-5.6-sol", Metadata: map[string]any{"selected_auth_id": "auth-1"}}
 	rawRequest, _ := json.Marshal(request)
@@ -211,7 +211,7 @@ func TestRejectsAbnormalCandidateAndExpiredInjection(t *testing.T) {
 	if _, errComplete := state.complete(rawSucceeded); errComplete != nil {
 		t.Fatal(errComplete)
 	}
-	if got := state.current["auth-1"].Value; got != seed {
+	if got := state.current[stateKey("auth-1", "gpt-5.6-sol")].Value; got != seed {
 		t.Fatal("abnormal candidate was promoted")
 	}
 }
@@ -223,7 +223,7 @@ func TestPersistedRefreshSurvivesReconfigure(t *testing.T) {
 	state.now = func() time.Time { return now }
 	seed := makeFernetToken(t, now.Add(-30*time.Minute), 12)
 	newer := makeFernetToken(t, now.Add(-5*time.Minute), 12)
-	config := "enabled: true\nstate_file: " + strings.ReplaceAll(statePath, "\\", "/") + "\ncredentials:\n  team-auth:\n    plan: team\n    state: " + seed + "\n"
+	config := "enabled: true\nstate_file: " + strings.ReplaceAll(statePath, "\\", "/") + "\ncredentials:\n  team-auth:\n    plan: team\n    state_model: gpt-6-astra\n    state: " + seed + "\n"
 	configureRuntime(t, state, config)
 
 	request := requestInterceptRequest{RequestID: "request-1", ToFormat: "codex", Model: "gpt-6-astra", Metadata: map[string]any{"selected_auth_id": "team-auth"}}
@@ -239,7 +239,7 @@ func TestPersistedRefreshSurvivesReconfigure(t *testing.T) {
 	reloaded := newRuntimeState()
 	reloaded.now = state.now
 	configureRuntime(t, reloaded, config)
-	if got := reloaded.current["team-auth"].Value; got != newer {
+	if got := reloaded.current[stateKey("team-auth", "gpt-6-astra")].Value; got != newer {
 		t.Fatal("persisted refreshed state was not restored")
 	}
 }
@@ -283,7 +283,7 @@ func TestConfiguredSeedMustMatchBaseline(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	abnormal := makeFernetToken(t, now, 11)
 	raw, errMarshal := json.Marshal(lifecycleRequest{
-		ConfigYAML:    []byte("enabled: true\ncredentials:\n  auth-1:\n    plan: plus\n    state: " + abnormal + "\n"),
+		ConfigYAML:    []byte("enabled: true\ncredentials:\n  auth-1:\n    plan: plus\n    state_model: gpt-5.6-sol\n    state: " + abnormal + "\n"),
 		SchemaVersion: pluginSchema,
 	})
 	if errMarshal != nil {
@@ -300,8 +300,8 @@ func TestConcurrentPersistenceKeepsLatestSnapshot(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	state.mu.Lock()
 	state.config.StateFile = statePath
-	state.current["auth-a"] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
-	state.current["auth-b"] = storedState{Value: makeFernetToken(t, now.Add(time.Minute), 12), IssuedAt: now.Add(time.Minute), Blocks: 12}
+	state.current[stateKey("auth-a", "gpt-5.6-sol")] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
+	state.current[stateKey("auth-b", "gpt-5.6-sol")] = storedState{Value: makeFernetToken(t, now.Add(time.Minute), 12), IssuedAt: now.Add(time.Minute), Blocks: 12}
 	state.mu.Unlock()
 
 	var wait sync.WaitGroup
@@ -319,7 +319,7 @@ func TestConcurrentPersistenceKeepsLatestSnapshot(t *testing.T) {
 	if errLoad != nil {
 		t.Fatal(errLoad)
 	}
-	if len(loaded) != 2 || loaded["auth-a"].Blocks != 10 || loaded["auth-b"].Blocks != 12 {
+	if len(loaded) != 2 || loaded[stateKey("auth-a", "gpt-5.6-sol")].Blocks != 10 || loaded[stateKey("auth-b", "gpt-5.6-sol")].Blocks != 12 {
 		t.Fatalf("persisted snapshot = %#v", loaded)
 	}
 }
@@ -331,7 +331,7 @@ func TestRetryRebindDiscardsPreviousCredentialCandidate(t *testing.T) {
 	seedA := makeFernetToken(t, now.Add(-30*time.Minute), 10)
 	seedB := makeFernetToken(t, now.Add(-25*time.Minute), 10)
 	candidateA := makeFernetToken(t, now.Add(-5*time.Minute), 10)
-	configureRuntime(t, state, "enabled: true\ncredentials:\n  auth-a:\n    plan: plus\n    state: "+seedA+"\n  auth-b:\n    plan: plus\n    state: "+seedB+"\n")
+	configureRuntime(t, state, "enabled: true\ncredentials:\n  auth-a:\n    plan: plus\n    state_model: gpt-5.6-sol\n    state: "+seedA+"\n  auth-b:\n    plan: plus\n    state_model: gpt-5.6-sol\n    state: "+seedB+"\n")
 
 	request := requestInterceptRequest{RequestID: "shared-request", ToFormat: "codex", Model: "gpt-5.6-sol", Metadata: map[string]any{"selected_auth_id": "auth-a"}}
 	rawRequest, _ := json.Marshal(request)
@@ -345,10 +345,10 @@ func TestRetryRebindDiscardsPreviousCredentialCandidate(t *testing.T) {
 	rawSucceeded, _ := json.Marshal(requestCompletion{RequestID: request.RequestID, Outcome: "succeeded"})
 	_, _ = state.complete(rawSucceeded)
 
-	if got := state.current["auth-a"].Value; got != seedA {
+	if got := state.current[stateKey("auth-a", "gpt-5.6-sol")].Value; got != seedA {
 		t.Fatal("candidate from failed/retried auth-a attempt was promoted")
 	}
-	if got := state.current["auth-b"].Value; got != seedB {
+	if got := state.current[stateKey("auth-b", "gpt-5.6-sol")].Value; got != seedB {
 		t.Fatal("auth-b state changed without an observed candidate")
 	}
 }

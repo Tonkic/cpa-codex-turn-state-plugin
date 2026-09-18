@@ -1,92 +1,66 @@
-# CPA Codex Turn State Plugin
+# CPA Codex Turn State Plugin v0.2.0
 
-A trusted in-process dynamic plugin for CLIProxyAPI (CPA) that injects and safely refreshes the opaque `X-Codex-Turn-State` header per selected Codex credential.
+A native CLIProxyAPI DLL that acquires and refreshes opaque X-Codex-Turn-State values per selected credential **and actual upstream model**. Business requests keep their existing CPA proxy; independent lightweight probes use a separate HTTP/SOCKS proxy pool with optional chaining.
 
-The plugin does not decrypt or generate turn state. It treats the value as an opaque Fernet token, reads only the public timestamp and ciphertext length, and never logs the token.
-
-## Behavior
-
-- Resolves the selected CPA credential from `Metadata["selected_auth_id"]` after authentication.
-- Injects an unexpired state only for Codex requests and an optional model scope.
-- Observes HTTP and SSE response headers.
-- Stages a newer response state as a candidate and promotes it only after the request completes successfully.
-- Rejects malformed, stale, future-dated, out-of-order, or unexpected-block-count candidates.
-- Keeps credentials isolated; a state observed for one auth ID is never used by another.
-- Optionally persists refreshed states using an atomic private JSON file.
-
-WebSocket state refresh is intentionally deferred in v0.1. HTTP and SSE Responses are supported.
+See [中文配置及使用说明](README_CN.md) for the tested HTTP proxy setup and complete operating behavior.
 
 ## Compatibility
 
-- Native plugin ABI: 1
-- JSON RPC schema: 4
-- Target host: CLIProxyAPI versions with the standard dynamic plugin host and schema 4 or newer
-- Target artifact: Windows amd64 DLL
+- Native ABI 1, JSON schema 4 or newer.
+- Windows amd64, Go 1.26+ and a cgo-compatible GCC.
+- CPA must support request/response interception, completion hooks and standard host.auth.list / host.auth.get callbacks.
+- DLL filename/plugin ID: cpa-codex-turn-state.dll / cpa-codex-turn-state.
+- HTTP and SSE supported. WebSocket capture is not implemented.
 
-Schema 4 is deliberately used as the compatibility floor shared by the deployed CPA versions for which this plugin was designed.
+## Behavior
+
+State keys contain both selected_auth_id and the actual upstream Model, never the client alias. Missing or nearly expired states trigger an on-demand ping for that exact account/model. A valid state requires a successful response.completed event and accepted token structure, timestamp and ciphertext block count. This is an opaque-token heuristic, not a compute-quality test.
+
+The first request may wait for the configured probe budget. Concurrent requests for the same key reuse the existing valid cache or proceed without state. A maximum of four account/model probes run concurrently. No idle background generation is performed. Failed probes have a cooldown, and no configured proxy can silently fall back to a direct connection.
+
+Probe payloads never contain the business prompt. OAuth credentials are read via the trusted host callback for the selected auth ID; the plugin never updates auth files. OAuth refresh remains CPA's responsibility. Probes only support standard Codex OAuth credentials without custom base_url.
+
+Successful business responses also stage replacement state, promoted only on successful request completion. Tokens are never shared across accounts or models.
 
 ## Configuration
 
-The DLL filename is the plugin ID. Install it as `cpa-codex-turn-state.dll` under `plugins/windows/amd64` or the configured plugin root.
+See [examples/proxy-pool.yaml](examples/proxy-pool.yaml). Merge its plugin block into CPA configuration. The chain runs in the DLL:
 
-```yaml
-plugins:
-  enabled: true
-  dir: "plugins"
-  configs:
-    cpa-codex-turn-state:
-      enabled: true
-      priority: 100
-      auto_update: true
-      inject_expired: false
-      state_file: "state/codex-turn-state.json"
-      defaults:
-        accepted_blocks: [10, 12]
-      credentials:
-        "<selected_auth_id>":
-          plan: plus
-          state: "<known-good-fernet-token>"
-          models:
-            - "gpt-5.6-*"
-            - "gpt-6-astra"
+```text
+probe → first_proxy (1080 SOCKS5) → proxy_pool entry (HTTP proxy HTTP CONNECT) → Codex
+business → existing CPA route
 ```
 
-Supported plans and default normal ciphertext block counts:
+No local sidecar/listening port is necessary. connect_host overrides only the HTTP proxy CONNECT Host header. It preserves the request-target authority and origin TLS hostname. This implements the verified workaround for a first-hop proxy with HTTP destination sniffing that otherwise rewrites the HTTP proxy destination.
 
-| Plan | Normal blocks | Typical padded token length |
-| --- | ---: | ---: |
-| Pro / Plus | 10 | 292 |
-| Team | 12 | 332 |
+Each endpoint has exactly one of url, url_file, or url_env. Secret files and environment variables are resolved per dial. Proxy schemes: http, https, socks5, socks5h. Both SOCKS schemes forward hostnames remotely. IPv6 literals require URL brackets; public IPv6 egress depends on the provider and has not been live-verified.
 
-An observed Pro/Plus state with 11 blocks or Team state with 13 blocks is not promoted. For another account type, set `normal_blocks` explicitly. Unknown plans without `normal_blocks` never auto-promote.
+Proxy pool selection rotates per probe. max_attempts defaults to 1 (range 1–5); failed or rejected attempts advance through the pool, sharing timeout_seconds (default 15, range 1–60). retry_seconds defaults to 60; refresh_before_seconds defaults to 300. A literal {session} in a secret URL is replaced with eight random hexadecimal characters on each connection.
 
-`defaults` applies only to selected auth IDs that are not explicitly listed. It is useful when auth IDs contain private account identifiers: `accepted_blocks: [10, 12]` bootstraps both Plus/Pro and Team states without copying those IDs into configuration. A shared `defaults.state` is rejected so one credential's state can never seed another credential. Explicit `credentials` entries override the fallback policy.
+Pro/Plus default to 10 ciphertext blocks (normally 292 padded characters), Team to 12 (332). Known abnormal 11/13-block values (312/356) are rejected. defaults.accepted_blocks: [10,12] allows discovery without copying account IDs into configuration; explicit per-account plans offer stricter filtering. Unknown plans require a configured baseline.
 
-Per-credential `auto_update` overrides the global setting.
+## Upgrade from v0.1.x
 
-## Security
+Version 1 state files contain no model identity and are intentionally not reused. Back up the old file and use a new state_file path, for example state/codex-turn-state-v2.json. New format version 2 stores JSON-encoded [authID,model] keys.
 
-- This is trusted in-process code. Treat the DLL like the CPA executable itself.
-- The state file contains opaque account state. Keep it private, exclude it from backups that are not already authorized to hold credential material, and never commit it.
-- The plugin does not log complete state values.
-- A configured seed state is part of CPA configuration. Prefer the private state file once initial validation is complete.
+Configured seeds require an exact state_model. A models wildcard is a policy filter, not permission to reuse a token across models. inject_expired remains an opt-in compatibility setting; keep it false. Future-dated values beyond clock tolerance are never injected.
 
-## Build
+## Status and security
 
-Requirements:
+GET /v0/management/codex-turn-state/status is management-authenticated. It exposes version, anonymous account digest, model, state length, timestamps, validity and sanitized probe results. It never returns credentials, full state, or proxy URLs.
 
-- Go 1.26 or newer
-- A Windows amd64 GCC toolchain available to cgo, such as MinGW-w64
+Treat the DLL as trusted code with access to host credentials. Keep state files and proxy secrets private and outside Git. TLS certificate verification stays enabled, redirects are disabled, and proxy authentication is scoped to the corresponding handshake.
+
+## Build and install
 
 ```powershell
 go test -race ./...
+go vet ./...
 ./scripts/build-windows.ps1
 ```
 
-The artifact is written to `dist/windows-amd64/cpa-codex-turn-state.dll`.
+Build artifact: dist/windows-amd64/cpa-codex-turn-state.dll. Install under plugins/windows/amd64 or the configured plugin root. Back up the prior DLL, configuration and state before upgrading; follow the host's plugin reload workflow and check registration/status. This repository does not automatically replace production plugins.
 
-## Installation safety
+For a running host, deploy as cpa-codex-turn-state-v0.2.0.dll. CPA recognizes the version suffix while preserving the plugin ID. Its hot replacement depends on a changed selected file path; overwriting the same path may leave the old module loaded. Retain the previous artifact for rollback. Run python scripts/smoke-dll.py to exercise the actual native ABI before deployment.
 
-Validate the DLL against a non-primary CPA instance first. Confirm plugin registration, unchanged CPA PID during hot reload, correct auth isolation, header injection, state promotion after successful completion, and absence of token values in logs before enabling it on production traffic.
-
-This repository does not modify or restart a running CPA service.
+Tests cover account/model isolation, expiry, cooldown, pool fallback, concurrency/reconfiguration, SSE completion validation, chained CONNECT headers, credential isolation, cancellation, IPv6 encoding and buffered tunnel data. Optional live tests require explicit CPA_LIVE_PROXY_URL; Codex tests additionally require CPA_LIVE_AUTH_FILE. They print only status and state length/block count.
