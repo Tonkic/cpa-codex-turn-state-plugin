@@ -9,7 +9,7 @@ $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 
 $output = Join-Path $distDir 'cpa-codex-turn-state.dll'
-go build -trimpath -buildmode=c-shared -o $output $repoRoot
+go build -trimpath -ldflags='-s -w' -buildmode=c-shared -o $output $repoRoot
 if ($LASTEXITCODE -ne 0) { throw 'Go plugin build failed' }
 
 $header = [System.IO.Path]::ChangeExtension($output, '.h')

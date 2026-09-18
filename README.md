@@ -2,7 +2,7 @@
 
 A native CLIProxyAPI DLL that acquires and refreshes opaque X-Codex-Turn-State values per selected credential **and actual upstream model**. Business requests keep their existing CPA proxy; independent lightweight probes use a separate HTTP/SOCKS proxy pool with optional chaining.
 
-See [中文配置及使用说明](README_CN.md) for the tested HTTP proxy setup and complete operating behavior.
+See [中文配置及使用说明](README_CN.md) for generic configuration and complete operating behavior. No deployment-specific proxy addresses or credentials are included.
 
 ## Compatibility
 
@@ -31,11 +31,11 @@ Successful business responses also stage replacement state, promoted only on suc
 See [examples/proxy-pool.yaml](examples/proxy-pool.yaml). Merge its plugin block into CPA configuration. The chain runs in the DLL:
 
 ```text
-probe → first_proxy (1080 SOCKS5) → proxy_pool entry (HTTP proxy HTTP CONNECT) → Codex
+probe → optional first_proxy → proxy_pool entry → Codex
 business → existing CPA route
 ```
 
-No local sidecar/listening port is necessary. connect_host overrides only the HTTP proxy CONNECT Host header. It preserves the request-target authority and origin TLS hostname. This implements the verified workaround for a first-hop proxy with HTTP destination sniffing that otherwise rewrites the HTTP proxy destination.
+No local sidecar/listening port is necessary. Set CPA_STATE_FIRST_PROXY_URL and CPA_STATE_PROXY_URL privately in the service environment; omit first_proxy if chaining is unnecessary. Never commit their values. connect_host optionally overrides only the HTTP proxy CONNECT Host header while preserving the request-target authority and origin TLS hostname; use it only if your first-hop proxy requires this sniffing workaround.
 
 Each endpoint has exactly one of url, url_file, or url_env. Secret files and environment variables are resolved per dial. Proxy schemes: http, https, socks5, socks5h. Both SOCKS schemes forward hostnames remotely. IPv6 literals require URL brackets; public IPv6 egress depends on the provider and has not been live-verified.
 
@@ -67,4 +67,4 @@ Build artifact: dist/windows-amd64/cpa-codex-turn-state.dll. Install under plugi
 
 For a running host, deploy as cpa-codex-turn-state-v0.3.0.dll. CPA recognizes the version suffix while preserving the plugin ID. Its hot replacement depends on a changed selected file path; overwriting the same path may leave the old module loaded. Retain the previous artifact for rollback. Run python scripts/smoke-dll.py to exercise the actual native ABI before deployment.
 
-Tests cover account/model isolation, expiry, cooldown, pool fallback, concurrency/reconfiguration, SSE completion validation, chained CONNECT headers, credential isolation, cancellation, IPv6 encoding and buffered tunnel data. Optional live tests require explicit CPA_LIVE_PROXY_URL; Codex tests additionally require CPA_LIVE_AUTH_FILE. They print only status and state length/block count.
+Tests cover account/model isolation, expiry, cooldown, pool fallback, concurrency/reconfiguration, SSE completion validation, chained CONNECT headers, credential isolation, cancellation, IPv6 encoding and buffered tunnel data. Optional live tests require explicit CPA_LIVE_PROXY_URL; Codex tests additionally require CPA_LIVE_AUTH_FILE. Set CPA_LIVE_FIRST_PROXY_URL for a first hop and CPA_LIVE_CONNECT_HOST only when necessary. They do not print exit IP addresses, credentials or full state. Normal CI uses synthetic credentials only; do not provide production secrets to CI.

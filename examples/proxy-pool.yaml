@@ -1,4 +1,4 @@
-# Merge this block into CPA config.yaml. Secrets are intentionally absent.
+# Merge this block into CPA config.yaml. Set environment variables privately.
 plugins:
   enabled: true
   dir: plugins
@@ -21,7 +21,8 @@ plugins:
         refresh_before_seconds: 300
         max_attempts: 1
         first_proxy:
-          url: socks5h://127.0.0.1:1080
+          url_env: CPA_STATE_FIRST_PROXY_URL
         proxy_pool:
-          - url_file: state/proxy-pool.url
-            connect_host: proxy.example.invalid:8080
+          - url_env: CPA_STATE_PROXY_URL
+            # Optional CONNECT Host override; replace with your proxy authority.
+            # connect_host: proxy.example.invalid:8080

@@ -18,7 +18,9 @@ CLIProxyAPI 的进程内 DLL 插件。保持现有 CPA 网关和业务代理，�
 
 长度只是配置的筛选规则，不代表已经验证“高算力”，本插件不做智力测试、不解密 state，也不保证上游一定签发 state。
 
-## 已验证的 HTTP proxy 配置
+## 通用代理池配置
+
+仓库不包含实际代理地址、端口、账号或密码。请在 CPA 服务环境中私下设置下面两个环境变量；不需要链式代理时删除 `first_proxy` 块。环境变量必须对 CPA 服务进程可见，不能只设置在另一个终端里。
 
 ```yaml
 plugins:
@@ -43,13 +45,14 @@ plugins:
         refresh_before_seconds: 300
         max_attempts: 1
         first_proxy:
-          url: "socks5h://127.0.0.1:1080"
+          url_env: CPA_STATE_FIRST_PROXY_URL
         proxy_pool:
-          - url_file: "state/proxy-pool.url"
-            connect_host: "proxy.example.invalid:8080"
+          - url_env: CPA_STATE_PROXY_URL
+            # 仅在需要 CONNECT Host 覆盖时设置你自己的代理主机和端口。
+            # connect_host: "proxy.example.invalid:8080"
 ```
 
-在私有文件 `state/proxy-pool.url` 放入一行：
+也可改用 `url_file: "state/proxy-pool.url"`，在该私有文件中放入一行代理 URL。以下仅是不可用的占位示例：
 
 ```text
 http://<URL编码后的用户名>:<URL编码后的密码>@proxy.example.invalid:8080
@@ -60,13 +63,13 @@ http://<URL编码后的用户名>:<URL编码后的密码>@proxy.example.invalid:
 链路直接在 DLL 内完成：
 
 ```text
-插件探测 → 1080 SOCKS5 → HTTP proxy HTTP CONNECT → Codex HTTPS
+插件探测 → 可选前置代理 → 代理池节点 → Codex HTTPS
 业务请求 → CPA 原有代理 → Codex HTTPS
 ```
 
-不需要 1081、Python sidecar 或更换网关。`connect_host` 等价于已验证 curl 的 `--proxy-header Host: ...`，修复第一跳 HTTP 嗅探覆盖 HTTP proxy 目标的问题；CONNECT 目标和网站 TLS/SNI 保持真实目标。只在已验证需要的 HTTP 代理上配置此字段。
+不需要额外监听端口、Python sidecar 或更换网关。`connect_host` 等价于 curl 的 `--proxy-header Host: ...`，用于处理前置代理 HTTP 嗅探改写目标的问题；CONNECT 目标和网站 TLS/SNI 保持真实目标。只在已验证需要的 HTTP 代理上配置此字段。
 
-代理池可增加多条 HTTP、HTTPS、SOCKS5 或 SOCKS5H URL；每轮轮询起点，失败/无可接受 state 时最多尝试 `max_attempts` 条，所有尝试共享总超时。不会绕过配置的代理直连。URL 中可放 `{session}`，每次拨号替换为 8 位随机十六进制字符，适用于 HTTP proxy 的 sid 格式。动态 IP 实际是否变化由代理商控制。
+代理池可增加多条 HTTP、HTTPS、SOCKS5 或 SOCKS5H URL；每轮轮询起点，失败/无可接受 state 时最多尝试 `max_attempts` 条，所有尝试共享总超时。不会绕过配置的代理直连。URL 中可放 `{session}`，每次拨号替换为 8 位随机十六进制字符；具体会话格式和动态 IP 是否变化由代理商控制。
 
 支持 IPv6 字面地址，例如 `socks5h://[::1]:1080`；SOCKS 目标域名交给代理解析。IPv6 公网出口取决于代理商，本次没有验证 IPv6 出口。仅代理探测 TCP 流量，不是整机 TUN/UDP 代理。
 
@@ -109,4 +112,4 @@ DLL 输出到 `dist/windows-amd64/cpa-codex-turn-state.dll`。安装路径及标
 
 从 v0.2.0 升级可直接沿用 v2 缓存。运行中升级使用版本化文件名 `cpa-codex-turn-state-v0.3.0.dll`：插件 ID 仍为 `cpa-codex-turn-state`，新的路径让宿主执行真正的 DLL 热替换；仅覆盖同路径文件并重新加载配置可能仍使用旧 DLL。保留旧 DLL 作为回退。
 
-实测 Go 插件链式传输到 HTTPS IP 查询成功。真实 Codex 探测中，一些账号返回 429，已确认一次错误为 usage_limit_reached；另一个账号完整完成并返回 356 字符、13 块的 state，按当前策略拒绝。网络/捕获成功不等于取得可接受的 state。单元测试验证隔离、池切换、失败复用、SSE 成功判定、取消和 IPv6 编码；原生 DLL ABI 和 CPA 7.3.6.1 宿主加载也已验证。
+单元测试使用合成凭据和 state，覆盖隔离、池切换、失败复用、SSE 成功判定、取消和 IPv6 编码；原生 DLL ABI 另有 smoke 测试。可选 live 测试仅在显式设置私有环境变量后运行，不向 CI 提供生产凭据。网络连接成功不等于获取合格 state，符合长度规则也不代表免于 429 或已验证高算力。

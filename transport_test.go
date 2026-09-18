@@ -233,11 +233,18 @@ func TestCONNECTPreservesCoalescedTunnelBytes(t *testing.T) {
 	}
 }
 
+func liveFirstProxy() *proxyEndpoint {
+	if os.Getenv("CPA_LIVE_FIRST_PROXY_URL") == "" {
+		return nil
+	}
+	return &proxyEndpoint{URLEnv: "CPA_LIVE_FIRST_PROXY_URL"}
+}
+
 func TestLiveProxyChain(t *testing.T) {
 	if os.Getenv("CPA_LIVE_PROXY_URL") == "" {
 		t.Skip("explicit live proxy required")
 	}
-	tr := chainTransport(&proxyEndpoint{URL: "socks5h://127.0.0.1:1080"}, proxyEndpoint{URLEnv: "CPA_LIVE_PROXY_URL", ConnectHost: "proxy.example.invalid:8080"})
+	tr := chainTransport(liveFirstProxy(), proxyEndpoint{URLEnv: "CPA_LIVE_PROXY_URL", ConnectHost: os.Getenv("CPA_LIVE_CONNECT_HOST")})
 	defer tr.CloseIdleConnections()
 	client := http.Client{Transport: tr, Timeout: 20 * time.Second}
 	resp, err := client.Get("https://api.ipify.org")
@@ -249,5 +256,5 @@ func TestLiveProxyChain(t *testing.T) {
 	if err != nil || resp.StatusCode != 200 || net.ParseIP(strings.TrimSpace(string(b))) == nil {
 		t.Fatal("no valid IP response")
 	}
-	t.Logf("HTTPS status=%d exit=%s", resp.StatusCode, strings.TrimSpace(string(b)))
+	t.Logf("HTTPS status=%d; valid exit IP received (address suppressed)", resp.StatusCode)
 }

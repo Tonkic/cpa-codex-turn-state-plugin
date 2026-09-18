@@ -27,7 +27,7 @@ func TestLiveCodexProbe(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	value, status := fetchProbe(ctx, auth, "gpt-5.6-sol", &proxyEndpoint{URL: "socks5h://127.0.0.1:1080"}, proxyEndpoint{URLEnv: "CPA_LIVE_PROXY_URL", ConnectHost: "proxy.example.invalid:8080"})
+	value, status := fetchProbe(ctx, auth, "gpt-5.6-sol", liveFirstProxy(), proxyEndpoint{URLEnv: "CPA_LIVE_PROXY_URL", ConnectHost: os.Getenv("CPA_LIVE_CONNECT_HOST")})
 	if status != "ok" {
 		t.Fatalf("Codex probe result=%s", status)
 	}
