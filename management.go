@@ -106,8 +106,13 @@ func (state *runtimeState) handleManagement(raw []byte) ([]byte, error) {
 		return managementEnvelope(managementResponse{
 			StatusCode: http.StatusOK,
 			Headers: map[string][]string{
-				"Content-Type":  {"text/html; charset=utf-8"},
-				"Cache-Control": {"no-store"},
+				"Content-Type":                 {"text/html; charset=utf-8"},
+				"Cache-Control":                {"no-store"},
+				"Content-Security-Policy":      {"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"},
+				"X-Content-Type-Options":       {"nosniff"},
+				"Referrer-Policy":              {"no-referrer"},
+				"X-Frame-Options":              {"SAMEORIGIN"},
+				"Cross-Origin-Resource-Policy": {"same-origin"},
 			},
 			Body: page,
 		}), nil
@@ -998,9 +1003,18 @@ func (state *runtimeState) clearAction(body []byte) (clearResult, error) {
 		if selective && !handles[target.Key] && !accounts[target.Account] && !models[strings.ToLower(model)] {
 			continue
 		}
-		if scope != "all" {
-			injectable := current.Value != "" && now.Before(current.IssuedAt.Add(turnStateTTL))
-			if scope == "invalid" && injectable {
+		expiresAt := current.IssuedAt.Add(turnStateTTL)
+		expired := current.Value == "" || !now.Before(expiresAt)
+		policy, managed := credentialFor(state.config, authID)
+		valid := current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(expiresAt)
+		compatible := managed && matchesModels(policy.Models, model) && normalBlockCount(policy, current.Blocks)
+		switch scope {
+		case "invalid":
+			if valid && compatible {
+				continue
+			}
+		case "expired":
+			if !expired {
 				continue
 			}
 		}

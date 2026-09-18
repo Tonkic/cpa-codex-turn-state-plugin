@@ -25,16 +25,21 @@ if [ -z "$version" ]; then
 fi
 
 image="${CPA_PLUGIN_BUILDER_IMAGE:-golang:1.26-bookworm}"
+platform="${CPA_PLUGIN_BUILDER_PLATFORM:-linux/amd64}"
 output="dist/linux-amd64/cpa-codex-turn-state-v${version}.so"
 # Reuse one module cache volume so repeated builds stay offline-friendly.
 modcache="${CPA_PLUGIN_GOMOD_VOLUME:-cpa-plugin-gomod}"
 
-echo "building ${output} with ${image}"
+mkdir -p "$(dirname "$output")"
+
+echo "building ${output} with ${image} for ${platform}"
 if [ "$skip_tests" -eq 0 ]; then
-  docker run --rm -v "$PWD:/src" -v "$modcache:/go/pkg/mod" -w /src -e CGO_ENABLED=1 "$image" sh -c 'go vet ./... && go test ./...'
+  docker run --rm --platform "$platform" -v "$PWD:/src" -v "$modcache:/go/pkg/mod" -w /src \
+    -e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=amd64 "$image" sh -c 'go vet ./... && go test ./...'
 fi
 
-docker run --rm -v "$PWD:/src" -v "$modcache:/go/pkg/mod" -w /src -e CGO_ENABLED=1 "$image" \
+docker run --rm --platform "$platform" -v "$PWD:/src" -v "$modcache:/go/pkg/mod" -w /src \
+  -e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=amd64 "$image" \
   go build -buildvcs=false -trimpath -ldflags="-s -w" -buildmode=c-shared -o "$output" .
 
 ls -l "$output" "${output%.so}.h"

@@ -109,6 +109,9 @@ func TestManagementDispatchServesPanelAndStatus(t *testing.T) {
 	if panel.StatusCode != http.StatusOK || !strings.HasPrefix(panel.Headers["Content-Type"][0], "text/html") {
 		t.Fatalf("panel status=%d headers=%#v", panel.StatusCode, panel.Headers)
 	}
+	if !strings.Contains(panel.Headers["Content-Security-Policy"][0], "frame-ancestors 'self'") || panel.Headers["X-Frame-Options"][0] != "SAMEORIGIN" {
+		t.Fatalf("panel security headers=%#v", panel.Headers)
+	}
 	page := string(panel.Body)
 	for _, token := range []string{"Codex Turn State", "entryRows", "codex-turn-state"} {
 		if !strings.Contains(page, token) {
@@ -272,9 +275,13 @@ func TestManagementClearProtectsValidState(t *testing.T) {
 	state.now = func() time.Time { return now }
 	validKey := stateKey("auth-a", "model-a")
 	expiredKey := stateKey("auth-b", "model-a")
+	futureKey := stateKey("auth-a", "model-future")
+	incompatibleKey := stateKey("auth-a", "model-incompatible")
 	state.mu.Lock()
 	state.current[validKey] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
 	state.current[expiredKey] = storedState{Value: makeFernetToken(t, now.Add(-2*time.Hour), 10), IssuedAt: now.Add(-2 * time.Hour), Blocks: 10}
+	state.current[futureKey] = storedState{Value: makeFernetToken(t, now.Add(10*time.Minute), 10), IssuedAt: now.Add(10 * time.Minute), Blocks: 10}
+	state.current[incompatibleKey] = storedState{Value: makeFernetToken(t, now, 11), IssuedAt: now, Blocks: 11}
 	state.probeResults[expiredKey] = "network_error"
 	state.mu.Unlock()
 
@@ -283,7 +290,7 @@ func TestManagementClearProtectsValidState(t *testing.T) {
 	if json.Unmarshal(result.Body, &cleared) != nil {
 		t.Fatalf("decode clear: %s", string(result.Body))
 	}
-	if len(cleared.Removed) != 1 || cleared.Remaining != 1 {
+	if len(cleared.Removed) != 3 || cleared.Remaining != 1 {
 		t.Fatalf("clear result = %#v", cleared)
 	}
 	state.mu.Lock()
@@ -305,6 +312,36 @@ func TestManagementClearProtectsValidState(t *testing.T) {
 	}
 	if len(hard.Removed) != 1 || hard.Remaining != 0 {
 		t.Fatalf("hard clear result = %#v", hard)
+	}
+}
+
+func TestManagementClearExpiredProtectsUnexpiredState(t *testing.T) {
+	state := newRuntimeState()
+	state.hostCall = mockAuthHost
+	configureRuntime(t, state, probeTestConfig)
+	now := time.Now().UTC().Truncate(time.Second)
+	state.now = func() time.Time { return now }
+	validKey := stateKey("auth-a", "model-a")
+	expiredKey := stateKey("auth-b", "model-a")
+	state.mu.Lock()
+	state.current[validKey] = storedState{Value: makeFernetToken(t, now, 10), IssuedAt: now, Blocks: 10}
+	state.current[expiredKey] = storedState{Value: makeFernetToken(t, now.Add(-2*time.Hour), 10), IssuedAt: now.Add(-2 * time.Hour), Blocks: 10}
+	state.mu.Unlock()
+
+	result := callManagement(t, state, http.MethodPost, "/v0/management/codex-turn-state/clear", map[string]any{"scope": "expired"})
+	var cleared clearResult
+	if json.Unmarshal(result.Body, &cleared) != nil {
+		t.Fatalf("decode clear: %s", string(result.Body))
+	}
+	if len(cleared.Removed) != 1 || cleared.Remaining != 1 {
+		t.Fatalf("clear result = %#v", cleared)
+	}
+	state.mu.Lock()
+	_, validStillThere := state.current[validKey]
+	_, expiredStillThere := state.current[expiredKey]
+	state.mu.Unlock()
+	if !validStillThere || expiredStillThere {
+		t.Fatal("expired-scope clear must remove only expired state")
 	}
 }
 
