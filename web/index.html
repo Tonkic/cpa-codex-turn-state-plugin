@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Turn State</title>
+  <style>/*__INLINE_CSS__*/</style>
+</head>
+<body>
+  <main class="shell" id="app" aria-busy="true">
+    <header class="page-header">
+      <div class="title-block">
+        <div class="eyebrow"><span class="dot" id="probeDot" aria-hidden="true"></span><span id="statusLabel">—</span></div>
+        <h1>Codex Turn State</h1>
+        <p class="subtitle" data-i18n="subtitle"></p>
+      </div>
+      <div class="header-actions">
+        <label class="switch-field">
+          <span data-i18n="autoPoll"></span>
+          <input id="autoPoll" type="checkbox" role="switch" checked>
+          <span class="switch" aria-hidden="true"></span>
+        </label>
+        <button class="button secondary" id="refreshAll" type="button" data-i18n="refreshAll"></button>
+        <button class="button ghost" id="clearInvalid" type="button" data-i18n="clearInvalid"></button>
+        <button class="button ghost" id="langToggle" type="button" aria-label="Switch language">EN</button>
+      </div>
+    </header>
+
+    <section class="notice panel" id="connectionNotice" hidden role="alert">
+      <div>
+        <strong data-i18n="noticeTitle"></strong>
+        <p id="connectionMessage"></p>
+      </div>
+      <button class="button secondary" id="retryConnection" type="button" data-i18n="reconnect"></button>
+    </section>
+
+    <section class="metrics" id="metrics" aria-label="summary">
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot green"></i><span data-i18n="metricValid"></span></span><strong id="metricValid">—</strong><small data-i18n="metricValidHint"></small></article>
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot blue"></i><span data-i18n="metricProbing"></span></span><strong id="metricProbing">—</strong><small id="metricProbingHint">—</small></article>
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot amber"></i><span data-i18n="metricPending"></span></span><strong id="metricPending">—</strong><small data-i18n="metricPendingHint"></small></article>
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot red"></i><span data-i18n="metricBackoff"></span></span><strong id="metricBackoff">—</strong><small id="metricBackoffHint">—</small></article>
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot grey"></i><span data-i18n="metricEmpty"></span></span><strong id="metricEmpty">—</strong><small data-i18n="metricEmptyHint"></small></article>
+      <article class="metric-card"><span class="metric-label"><i class="metric-dot purple"></i><span data-i18n="metricAccounts"></span></span><strong id="metricAccounts">—</strong><small id="metricAccountsHint">—</small></article>
+    </section>
+
+    <section class="toolbar panel" aria-label="filters">
+      <label class="field compact"><span data-i18n="filterStatus"></span><select id="statusFilter"></select></label>
+      <label class="field compact"><span data-i18n="filterModel"></span><select id="modelFilter"></select></label>
+      <label class="field compact"><span data-i18n="filterSort"></span><select id="sortSelect">
+        <option value="severity" data-i18n="sortSeverity"></option>
+        <option value="expiry" data-i18n="sortExpiry"></option>
+        <option value="account" data-i18n="sortAccount"></option>
+        <option value="model" data-i18n="sortModel"></option>
+      </select></label>
+      <label class="check-field"><input type="checkbox" id="hideUnprobeable"><span data-i18n="hideUnprobeable"></span></label>
+      <div class="toolbar-spacer"></div>
+      <input class="search" id="search" type="search" data-i18n-placeholder="searchPlaceholder" autocomplete="off">
+      <button class="button ghost" id="detailToggle" type="button" aria-expanded="false" aria-controls="detailPanels" data-i18n="details"></button>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="section-heading">
+        <div><h2 data-i18n="tableTitle"></h2><p id="tableDescription">—</p></div>
+        <span class="count-label" id="entryCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="colStatus"></th>
+              <th scope="col" data-i18n="colAccount"></th>
+              <th scope="col" data-i18n="colModel"></th>
+              <th scope="col" data-i18n="colState"></th>
+              <th scope="col" data-i18n="colIssued"></th>
+              <th scope="col" data-i18n="colExpires"></th>
+              <th scope="col" data-i18n="colNextRefresh"></th>
+              <th scope="col" data-i18n="colLastProbe"></th>
+              <th scope="col" data-i18n="colActions"></th>
+            </tr>
+          </thead>
+          <tbody id="entryRows"><tr><td class="empty" colspan="9" data-i18n="loading"></td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div id="detailPanels" hidden>
+      <section class="panel">
+        <div class="section-heading"><div><h2 data-i18n="probeTitle"></h2><p data-i18n="probeHint"></p></div><span class="count-label" id="probeState">—</span></div>
+        <dl class="kv-grid" id="probeGrid"></dl>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><div><h2 data-i18n="configuredTitle"></h2><p data-i18n="configuredHint"></p></div><span class="count-label" id="configuredCount">—</span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th scope="col" data-i18n="colAccount"></th>
+              <th scope="col" data-i18n="colPlan"></th>
+              <th scope="col" data-i18n="colRule"></th>
+              <th scope="col" data-i18n="colScope"></th>
+              <th scope="col" data-i18n="colState"></th>
+            </tr></thead>
+            <tbody id="configuredRows"><tr><td class="empty" colspan="5">—</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><div><h2 data-i18n="historyTitle"></h2><p data-i18n="historyHint"></p></div></div>
+        <div id="historyList" class="history-list"><div class="empty-block">—</div></div>
+      </section>
+    </div>
+
+    <footer class="page-footer">
+      <div><span data-i18n="footerPlugin"></span> <code id="pluginVersion">—</code><span class="sep">·</span><span id="serverClock">—</span></div>
+      <div><span data-i18n="footerUpdated"></span> <span id="updatedAt">—</span><span class="sep">·</span><button class="link-button" id="hardClear" type="button" data-i18n="hardClear"></button></div>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script>/*__INLINE_JS__*/</script>
+</body>
+</html>

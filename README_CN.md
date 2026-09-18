@@ -1,4 +1,4 @@
-# CPA Codex Turn State 插件 v0.3.0
+# CPA Codex Turn State 插件 v0.4.1
 
 CLIProxyAPI 的进程内 DLL 插件。保持现有 CPA 网关和业务代理，只让独立 state 探测使用代理池或链式代理。
 
@@ -86,7 +86,7 @@ v0.1.x 缓存只记录账号，没有模型信息，v0.2.0 不会复用它。建
 
 默认不注入过期 state。保留 `inject_expired` 兼容选项，但建议始终为 false。未知来源的客户端 state 在已纳入管理的账号/模型上会被清除或替换。
 
-## 查看状态
+## 查看状态与管理面板
 
 带 CPA 管理密钥访问：
 
@@ -94,7 +94,15 @@ v0.1.x 缓存只记录账号，没有模型信息，v0.2.0 不会复用它。建
 GET /v0/management/codex-turn-state/status
 ```
 
-返回版本、后台启用状态、账号匿名摘要、模型、state 长度、签发/到期时间、next_refresh_at、refresh_pending、last_probe_reason 和最近探测结果；不返回 state、账号 token 或代理密码。例如 `upstream_http_429_usage_limit_reached` 表示已连接 Codex，但账号额度限制导致探测失败。next_refresh_at 是考虑冷却/额度退避后的下一次可尝试时间；排队可能带来少量延迟。
+返回版本、后台启用状态、账号匿名摘要、可选的宿主邮箱、模型、state 长度、签发/到期时间、next_refresh_at、refresh_pending、last_probe_reason、计数器和短探测历史；不返回 state 原文、OAuth token 或代理密码。例如 `upstream_http_429_usage_limit_reached` 表示已连接 Codex，但账号额度限制导致探测失败。next_refresh_at 是考虑冷却/额度退避后的下一次可尝试时间；排队可能带来少量延迟。
+
+支持插件资源页的 CPA 管理端可打开嵌入面板：
+
+```text
+GET /v0/resource/plugins/cpa-codex-turn-state/panel
+```
+
+菜单名是 “Codex Turn State”。面板读取 status，并可排队手动刷新或清理无效缓存。`POST /v0/management/codex-turn-state/refresh` 必须带明确选择器（`all` / `keys` / `accounts` / `models`），空 body 不会刷新全部；最近探测为 `auth_unavailable` 的条目会被跳过。`POST /v0/management/codex-turn-state/clear` 的 `scope=invalid` 只删不可用缓存；`scope=all` 还需要 `all=true`。
 
 当前支持 Codex OAuth、标准 ChatGPT Codex endpoint、HTTP/SSE；不对 API-key/自定义 base_url 账号发独立探测，不主动刷新 OAuth token，token 刷新继续由 CPA 负责。WebSocket state 捕获仍未实现。
 
@@ -110,6 +118,8 @@ go vet ./...
 
 DLL 输出到 `dist/windows-amd64/cpa-codex-turn-state.dll`。安装路径及标准 ABI 说明见 [README.md](README.md)。
 
-从 v0.2.0 升级可直接沿用 v2 缓存。运行中升级使用版本化文件名 `cpa-codex-turn-state-v0.3.0.dll`：插件 ID 仍为 `cpa-codex-turn-state`，新的路径让宿主执行真正的 DLL 热替换；仅覆盖同路径文件并重新加载配置可能仍使用旧 DLL。保留旧 DLL 作为回退。
+Linux amd64 可用 `./scripts/build-linux.sh` 生成 `dist/linux-amd64/cpa-codex-turn-state-v0.4.1.so`。
+
+从 v0.2.0 升级可直接沿用 v2 缓存。运行中升级使用版本化文件名 `cpa-codex-turn-state-v0.4.1.dll` 或 `.so`：插件 ID 仍为 `cpa-codex-turn-state`，新的路径让宿主执行真正的热替换；仅覆盖同路径文件并重新加载配置可能仍使用旧模块。保留旧文件作为回退。
 
 单元测试使用合成凭据和 state，覆盖隔离、池切换、失败复用、SSE 成功判定、取消和 IPv6 编码；原生 DLL ABI 另有 smoke 测试。可选 live 测试仅在显式设置私有环境变量后运行，不向 CI 提供生产凭据。网络连接成功不等于获取合格 state，符合长度规则也不代表免于 429 或已验证高算力。

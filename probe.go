@@ -4,10 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -47,7 +46,7 @@ func normalizeProbe(cfg *probeConfig) error {
 	if cfg.QuotaBackoffSeconds < 60 || cfg.QuotaBackoffSeconds > 86400 {
 		return errors.New("quota_backoff_seconds must be between 60 and 86400")
 	}
-	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 60 || cfg.RetrySeconds < 1 || cfg.RefreshBeforeSeconds < 0 || cfg.RefreshBeforeSeconds >= 3600 || cfg.MaxAttempts < 1 || cfg.MaxAttempts > 5 {
+	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 180 || cfg.RetrySeconds < 1 || cfg.RefreshBeforeSeconds < 0 || cfg.RefreshBeforeSeconds >= 3600 || cfg.MaxAttempts < 1 || cfg.MaxAttempts > 20 {
 		return errors.New("invalid probe limits")
 	}
 	if !cfg.Enabled {
@@ -212,6 +211,25 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		delete(state.blockedUntil, key)
 		promoted = true
 	}
+	state.appendHistoryLocked(historyEntry{
+		At:      state.now(),
+		Account: accountDigest(authID),
+		Model:   model,
+		Event:   "probe",
+		Outcome: outcome,
+		Reason:  reason,
+	})
+	if promoted {
+		state.appendHistoryLocked(historyEntry{
+			At:      state.now(),
+			Account: accountDigest(authID),
+			Model:   model,
+			Event:   "promote",
+			Outcome: "ok",
+			Reason:  reason,
+			Detail:  fmt.Sprintf("blocks=%d length=%d", candidate.Blocks, len(candidate.Value)),
+		})
+	}
 	path := state.config.StateFile
 	state.mu.Unlock()
 	if promoted && path != "" {
@@ -223,34 +241,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 }
 
-func (state *runtimeState) statusResponse() ([]byte, error) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	keys := make(map[string]bool)
-	for key := range state.current {
-		keys[key] = true
-	}
-	for key := range state.probeResults {
-		keys[key] = true
-	}
-	for key := range state.refreshRequests {
-		keys[key] = true
-	}
-	entries := make([]map[string]any, 0, len(keys))
-	for key := range keys {
-		auth, model := splitStateKey(key)
-		digest := sha256.Sum256([]byte(auth))
-		s := state.current[key]
-		entries = append(entries, map[string]any{"account": hex.EncodeToString(digest[:6]), "model": model, "state_length": len(s.Value), "issued_at": s.IssuedAt, "expires_at": s.IssuedAt.Add(turnStateTTL), "valid": s.Value != "" && !s.IssuedAt.After(state.now().Add(5*time.Minute)) && state.now().Before(s.IssuedAt.Add(turnStateTTL)), "last_probe": state.probeResults[key], "last_probe_at": state.lastProbe[key], "last_probe_reason": state.probeReasons[key], "refresh_pending": state.refreshRequests[key], "next_refresh_at": state.nextRefreshLocked(key), "probing": state.probing[key]})
-	}
-	body, _ := json.Marshal(map[string]any{"version": pluginVersion, "probe_enabled": state.config.Probe.Enabled, "background_refresh": state.workerDone != nil, "refresh_before_seconds": state.config.Probe.RefreshBeforeSeconds, "entries": entries})
-	return okEnvelope(struct {
-		StatusCode int
-		Headers    http.Header
-		Body       []byte
-	}{200, http.Header{"Content-Type": {"application/json"}}, body})
-}
-
+// Probe outcomes and promotions are recorded in state.history for the panel.
 // Probes use a tiny independent prompt, never the user's business payload.
 // Success requires response.completed; an HTTP 200 with a failed SSE is rejected.
 func fetchProbe(ctx context.Context, auth probeAuth, model string, first *proxyEndpoint, second proxyEndpoint) (string, string) {
