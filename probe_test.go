@@ -51,6 +51,7 @@ defaults:
   accepted_blocks: [10, 12]
 probe:
   enabled: true
+  background_refresh: false
   first_proxy:
     url: socks5h://127.0.0.1:1080
   proxy_pool:

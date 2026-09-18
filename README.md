@@ -1,4 +1,4 @@
-# CPA Codex Turn State Plugin v0.2.0
+# CPA Codex Turn State Plugin v0.3.0
 
 A native CLIProxyAPI DLL that acquires and refreshes opaque X-Codex-Turn-State values per selected credential **and actual upstream model**. Business requests keep their existing CPA proxy; independent lightweight probes use a separate HTTP/SOCKS proxy pool with optional chaining.
 
@@ -16,7 +16,11 @@ See [中文配置及使用说明](README_CN.md) for the tested HTTP proxy setup 
 
 State keys contain both selected_auth_id and the actual upstream Model, never the client alias. Missing or nearly expired states trigger an on-demand ping for that exact account/model. A valid state requires a successful response.completed event and accepted token structure, timestamp and ciphertext block count. This is an opaque-token heuristic, not a compute-quality test.
 
-The first request may wait for the configured probe budget. Concurrent requests for the same key reuse the existing valid cache or proceed without state. A maximum of four account/model probes run concurrently. No idle background generation is performed. Failed probes have a cooldown, and no configured proxy can silently fall back to a direct connection.
+The first request may wait for the configured probe budget. Concurrent requests for the same key reuse the existing valid cache or proceed without state. A maximum of four account/model probes run concurrently. A background worker checks known cached keys every five seconds and proactively refreshes at issuance + 55 minutes by default, without requiring business traffic. Persisted v2 cache restores the schedule on restart. Failed probes have a cooldown, and no configured proxy can silently fall back to a direct connection.
+
+HTTP 429, 502/503/504, overload and matching SSE failures queue early refresh without blocking completion hooks. Credential retries queue the previous selected key as well, including failed attempts hidden by host failover. Assistant content and client cancellations do not trigger refresh. Signals coalesce per account/model and respect retry_seconds. Explicit quota-exhaustion probe responses back off for quota_backoff_seconds (default 900); refreshing state cannot restore quota. New accepted state replaces old state immediately and resets the refresh deadline. Quiesce/reconfiguration cancels and drains the background worker before host callbacks are retired.
+
+background_refresh and refresh_on_errors default to true when probes are enabled. Set them false to opt out. Background work only targets known cache keys or queued failures, not undiscovered account/model combinations. Status includes next_refresh_at, refresh_pending, last_probe_reason and last_probe_at. A v0.2.0 upgrade preserves v2 cached state.
 
 Probe payloads never contain the business prompt. OAuth credentials are read via the trusted host callback for the selected auth ID; the plugin never updates auth files. OAuth refresh remains CPA's responsibility. Probes only support standard Codex OAuth credentials without custom base_url.
 
@@ -61,6 +65,6 @@ go vet ./...
 
 Build artifact: dist/windows-amd64/cpa-codex-turn-state.dll. Install under plugins/windows/amd64 or the configured plugin root. Back up the prior DLL, configuration and state before upgrading; follow the host's plugin reload workflow and check registration/status. This repository does not automatically replace production plugins.
 
-For a running host, deploy as cpa-codex-turn-state-v0.2.0.dll. CPA recognizes the version suffix while preserving the plugin ID. Its hot replacement depends on a changed selected file path; overwriting the same path may leave the old module loaded. Retain the previous artifact for rollback. Run python scripts/smoke-dll.py to exercise the actual native ABI before deployment.
+For a running host, deploy as cpa-codex-turn-state-v0.3.0.dll. CPA recognizes the version suffix while preserving the plugin ID. Its hot replacement depends on a changed selected file path; overwriting the same path may leave the old module loaded. Retain the previous artifact for rollback. Run python scripts/smoke-dll.py to exercise the actual native ABI before deployment.
 
 Tests cover account/model isolation, expiry, cooldown, pool fallback, concurrency/reconfiguration, SSE completion validation, chained CONNECT headers, credential isolation, cancellation, IPv6 encoding and buffered tunnel data. Optional live tests require explicit CPA_LIVE_PROXY_URL; Codex tests additionally require CPA_LIVE_AUTH_FILE. They print only status and state length/block count.

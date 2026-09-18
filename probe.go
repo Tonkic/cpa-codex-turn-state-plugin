@@ -23,6 +23,9 @@ type probeConfig struct {
 	RetrySeconds         int             `yaml:"retry_seconds"`
 	RefreshBeforeSeconds int             `yaml:"refresh_before_seconds"`
 	MaxAttempts          int             `yaml:"max_attempts"`
+	BackgroundRefresh    *bool           `yaml:"background_refresh"`
+	RefreshOnErrors      *bool           `yaml:"refresh_on_errors"`
+	QuotaBackoffSeconds  int             `yaml:"quota_backoff_seconds"`
 }
 
 func normalizeProbe(cfg *probeConfig) error {
@@ -37,6 +40,12 @@ func normalizeProbe(cfg *probeConfig) error {
 	}
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 1
+	}
+	if cfg.QuotaBackoffSeconds == 0 {
+		cfg.QuotaBackoffSeconds = 900
+	}
+	if cfg.QuotaBackoffSeconds < 60 || cfg.QuotaBackoffSeconds > 86400 {
+		return errors.New("quota_backoff_seconds must be between 60 and 86400")
 	}
 	if cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 60 || cfg.RetrySeconds < 1 || cfg.RefreshBeforeSeconds < 0 || cfg.RefreshBeforeSeconds >= 3600 || cfg.MaxAttempts < 1 || cfg.MaxAttempts > 5 {
 		return errors.New("invalid probe limits")
@@ -125,12 +134,17 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	cfg := state.config
 	policy, ok := credentialFor(cfg, authID)
 	now := state.now()
-	if !state.accepting || !cfg.Probe.Enabled || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 4 {
+	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 4 {
 		state.mu.Unlock()
 		return
 	}
 	current := state.current[key]
-	if current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(current.IssuedAt.Add(turnStateTTL-time.Duration(cfg.Probe.RefreshBeforeSeconds)*time.Second)) {
+	reason := state.refreshRequests[key]
+	if reason == "" && current.Value != "" && !current.IssuedAt.After(now.Add(5*time.Minute)) && now.Before(current.IssuedAt.Add(turnStateTTL-time.Duration(cfg.Probe.RefreshBeforeSeconds)*time.Second)) {
+		state.mu.Unlock()
+		return
+	}
+	if now.Before(state.blockedUntil[key]) {
 		state.mu.Unlock()
 		return
 	}
@@ -139,6 +153,14 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 		return
 	}
 	state.lastProbe[key] = now
+	if reason == "" {
+		if current.Value != "" {
+			reason = "before_expiry"
+		} else {
+			reason = "missing_state"
+		}
+	}
+	state.probeReasons[key] = reason
 	state.probing[key] = true
 	generation := state.generation
 	ctx, cancel := context.WithTimeout(state.probeCtx, time.Duration(cfg.Probe.TimeoutSeconds)*time.Second)
@@ -159,6 +181,9 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 			attemptCancel()
 			outcome = status
 			if status != "ok" {
+				if strings.Contains(status, "usage_limit_reached") || strings.Contains(status, "insufficient_quota") {
+					break
+				}
 				continue
 			}
 			parsed, parseErr := parseTurnState(value, cfg.MaxStateBytes)
@@ -177,9 +202,14 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	}
 	delete(state.probing, key)
 	state.probeResults[key] = outcome
+	if strings.Contains(outcome, "usage_limit_reached") || strings.Contains(outcome, "insufficient_quota") {
+		state.blockedUntil[key] = state.now().Add(time.Duration(cfg.Probe.QuotaBackoffSeconds) * time.Second)
+	}
 	promoted := false
 	if state.accepting && candidate.Value != "" && candidate.IssuedAt.After(state.current[key].IssuedAt) && state.now().Before(candidate.IssuedAt.Add(turnStateTTL)) {
 		state.current[key] = candidate
+		delete(state.refreshRequests, key)
+		delete(state.blockedUntil, key)
 		promoted = true
 	}
 	path := state.config.StateFile
@@ -203,14 +233,17 @@ func (state *runtimeState) statusResponse() ([]byte, error) {
 	for key := range state.probeResults {
 		keys[key] = true
 	}
+	for key := range state.refreshRequests {
+		keys[key] = true
+	}
 	entries := make([]map[string]any, 0, len(keys))
 	for key := range keys {
 		auth, model := splitStateKey(key)
 		digest := sha256.Sum256([]byte(auth))
 		s := state.current[key]
-		entries = append(entries, map[string]any{"account": hex.EncodeToString(digest[:6]), "model": model, "state_length": len(s.Value), "issued_at": s.IssuedAt, "expires_at": s.IssuedAt.Add(turnStateTTL), "valid": s.Value != "" && !s.IssuedAt.After(state.now().Add(5*time.Minute)) && state.now().Before(s.IssuedAt.Add(turnStateTTL)), "last_probe": state.probeResults[key]})
+		entries = append(entries, map[string]any{"account": hex.EncodeToString(digest[:6]), "model": model, "state_length": len(s.Value), "issued_at": s.IssuedAt, "expires_at": s.IssuedAt.Add(turnStateTTL), "valid": s.Value != "" && !s.IssuedAt.After(state.now().Add(5*time.Minute)) && state.now().Before(s.IssuedAt.Add(turnStateTTL)), "last_probe": state.probeResults[key], "last_probe_at": state.lastProbe[key], "last_probe_reason": state.probeReasons[key], "refresh_pending": state.refreshRequests[key], "next_refresh_at": state.nextRefreshLocked(key), "probing": state.probing[key]})
 	}
-	body, _ := json.Marshal(map[string]any{"version": pluginVersion, "probe_enabled": state.config.Probe.Enabled, "entries": entries})
+	body, _ := json.Marshal(map[string]any{"version": pluginVersion, "probe_enabled": state.config.Probe.Enabled, "background_refresh": state.workerDone != nil, "refresh_before_seconds": state.config.Probe.RefreshBeforeSeconds, "entries": entries})
 	return okEnvelope(struct {
 		StatusCode int
 		Headers    http.Header

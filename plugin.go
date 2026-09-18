@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.2.0"
+	pluginVersion     = "0.3.0"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -74,8 +74,9 @@ type persistedFile struct {
 }
 
 type requestBinding struct {
-	AuthID string
-	Key    string
+	AuthID       string
+	Key          string
+	StreamBuffer []byte
 }
 
 type stateCandidate struct {
@@ -85,37 +86,45 @@ type stateCandidate struct {
 }
 
 type runtimeState struct {
-	mu           sync.Mutex
-	persistMu    sync.Mutex
-	now          func() time.Time
-	accepting    bool
-	config       pluginConfig
-	current      map[string]storedState
-	requests     map[string]requestBinding
-	candidates   map[string]stateCandidate
-	hostCall     func(string, any, any) error
-	probeCtx     context.Context
-	probeCancel  context.CancelFunc
-	generation   uint64
-	probing      map[string]bool
-	lastProbe    map[string]time.Time
-	probeResults map[string]string
-	poolCursor   uint64
-	fetch        func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
+	mu              sync.Mutex
+	persistMu       sync.Mutex
+	now             func() time.Time
+	accepting       bool
+	config          pluginConfig
+	current         map[string]storedState
+	requests        map[string]requestBinding
+	candidates      map[string]stateCandidate
+	hostCall        func(string, any, any) error
+	probeCtx        context.Context
+	probeCancel     context.CancelFunc
+	generation      uint64
+	probing         map[string]bool
+	lastProbe       map[string]time.Time
+	probeResults    map[string]string
+	poolCursor      uint64
+	fetch           func(context.Context, probeAuth, string, *proxyEndpoint, proxyEndpoint) (string, string)
+	workerDone      chan struct{}
+	wake            chan struct{}
+	refreshRequests map[string]string
+	probeReasons    map[string]string
+	blockedUntil    map[string]time.Time
 }
 
 var runtime = newRuntimeState()
 
 func newRuntimeState() *runtimeState {
 	return &runtimeState{
-		now:          time.Now,
-		fetch:        fetchProbe,
-		current:      make(map[string]storedState),
-		requests:     make(map[string]requestBinding),
-		candidates:   make(map[string]stateCandidate),
-		probing:      make(map[string]bool),
-		lastProbe:    make(map[string]time.Time),
-		probeResults: make(map[string]string),
+		now:             time.Now,
+		fetch:           fetchProbe,
+		current:         make(map[string]storedState),
+		requests:        make(map[string]requestBinding),
+		candidates:      make(map[string]stateCandidate),
+		probing:         make(map[string]bool),
+		lastProbe:       make(map[string]time.Time),
+		probeResults:    make(map[string]string),
+		refreshRequests: make(map[string]string),
+		probeReasons:    make(map[string]string),
+		blockedUntil:    make(map[string]time.Time),
 	}
 }
 
@@ -195,14 +204,17 @@ type streamChunkInterceptRequest struct {
 	ResponseHeaders http.Header    `json:"ResponseHeaders"`
 	ChunkIndex      int            `json:"ChunkIndex"`
 	Metadata        map[string]any `json:"Metadata"`
+	Body            []byte         `json:"Body"`
 }
 
 type streamChunkInterceptResponse struct{}
 
 type requestCompletion struct {
-	RequestID string         `json:"RequestID"`
-	Outcome   string         `json:"Outcome"`
-	Metadata  map[string]any `json:"Metadata"`
+	RequestID  string         `json:"RequestID"`
+	Outcome    string         `json:"Outcome"`
+	Metadata   map[string]any `json:"Metadata"`
+	StatusCode int            `json:"StatusCode"`
+	Error      string         `json:"Error"`
 }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
@@ -347,6 +359,7 @@ func (state *runtimeState) configure(raw []byte) error {
 		}
 	}
 
+	state.stopBackground()
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.probeCancel != nil {
@@ -357,6 +370,9 @@ func (state *runtimeState) configure(raw []byte) error {
 	state.probing = make(map[string]bool)
 	state.lastProbe = make(map[string]time.Time)
 	state.probeResults = make(map[string]string)
+	state.refreshRequests = make(map[string]string)
+	state.probeReasons = make(map[string]string)
+	state.blockedUntil = make(map[string]time.Time)
 	// Preserve in-memory states on hot reconfiguration even without a state file.
 	for key, candidate := range state.current {
 		authID, model := splitStateKey(key)
@@ -370,6 +386,7 @@ func (state *runtimeState) configure(raw []byte) error {
 	state.requests = make(map[string]requestBinding)
 	state.candidates = make(map[string]stateCandidate)
 	state.accepting = cfg.Enabled
+	state.startBackgroundLocked()
 	return nil
 }
 
@@ -381,6 +398,9 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 	// Retries can also switch to an unmanaged credential/provider. Never retain
 	// a previous attempt's candidate just because this attempt is out of scope.
 	state.mu.Lock()
+	if previous, exists := state.requests[req.RequestID]; exists {
+		state.queueRefreshLocked(previous.Key, "credential_retry")
+	}
 	delete(state.requests, req.RequestID)
 	delete(state.candidates, req.RequestID)
 	state.mu.Unlock()
@@ -439,6 +459,8 @@ func (state *runtimeState) interceptStreamChunk(raw []byte) ([]byte, error) {
 	}
 	if req.ChunkIndex == -1 {
 		state.captureCandidate(req.RequestID, req.ResponseHeaders)
+	} else {
+		state.observeStreamFailure(req.RequestID, req.Body)
 	}
 	return okEnvelope(streamChunkInterceptResponse{})
 }
@@ -484,12 +506,18 @@ func (state *runtimeState) complete(raw []byte) ([]byte, error) {
 
 	state.mu.Lock()
 	candidate, hasCandidate := state.candidates[completion.RequestID]
+	if binding, ok := state.requests[completion.RequestID]; ok && completion.Outcome == "failed" {
+		if reason := failureRefreshReason(completion.StatusCode, completion.Error); reason != "" {
+			state.queueRefreshLocked(binding.Key, reason)
+		}
+	}
 	delete(state.candidates, completion.RequestID)
 	delete(state.requests, completion.RequestID)
 	promoted := false
 	if hasCandidate && state.accepting && completion.Outcome == "succeeded" && state.now().Before(candidate.State.IssuedAt.Add(turnStateTTL)) {
 		if existing, exists := state.current[candidate.Key]; !exists || candidate.State.IssuedAt.After(existing.IssuedAt) {
 			state.current[candidate.Key] = candidate.State
+			delete(state.refreshRequests, candidate.Key)
 			promoted = true
 		}
 	}
@@ -506,14 +534,18 @@ func (state *runtimeState) complete(raw []byte) ([]byte, error) {
 
 func (state *runtimeState) setAccepting(accepting bool) {
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	state.accepting = accepting
 	if !accepting && state.probeCancel != nil {
 		state.probeCancel()
 	}
+	state.mu.Unlock()
+	if !accepting {
+		state.stopBackground()
+	}
 }
 
 func (state *runtimeState) shutdown() {
+	state.setAccepting(false)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.accepting = false

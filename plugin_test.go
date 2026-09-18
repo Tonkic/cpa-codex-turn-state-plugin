@@ -24,6 +24,7 @@ func boolPointer(value bool) *bool { return &value }
 
 func configureRuntime(t *testing.T, state *runtimeState, yamlConfig string) {
 	t.Helper()
+	t.Cleanup(state.shutdown)
 	raw, errMarshal := json.Marshal(lifecycleRequest{ConfigYAML: []byte(yamlConfig), SchemaVersion: pluginSchema})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)

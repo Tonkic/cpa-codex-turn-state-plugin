@@ -1,4 +1,4 @@
-# CPA Codex Turn State 插件 v0.2.0
+# CPA Codex Turn State 插件 v0.3.0
 
 CLIProxyAPI 的进程内 DLL 插件。保持现有 CPA 网关和业务代理，只让独立 state 探测使用代理池或链式代理。
 
@@ -10,7 +10,11 @@ CLIProxyAPI 的进程内 DLL 插件。保持现有 CPA 网关和业务代理，�
 4. 业务请求注入该账号、该模型的有效 state，继续使用 CPA 原有代理。探测失败时复用仍有效的缓存；没有有效缓存时照常放行业务请求。
 5. 业务响应也能提供新的候选 state，只有业务请求最终成功后才提升。
 
-按需获取，不会在空闲时后台刷票。新账号第一次实际被选中时即可获取；不同模型分别获取。默认 TTL 为签发时间起一小时。每个账号/模型探测失败后默认等待 60 秒才重试，最多同时探测 4 组。
+新账号/模型第一次实际被选中时按需获取。已有缓存则由后台主动维护：默认在签发后 55 分钟（到期前 5 分钟）开始获取新 state，无需业务流量触发。后台每 5 秒检查一次到期任务；重启或热更新会从 v2 缓存恢复计划。成功获得更新、合格的 state 后立即替换缓存，并按新签发时间重新计算下次刷新。
+
+最终失败的 429、502/503/504、overload，以及 SSE 中的对应错误会排队提前刷新；内部重试事件也会为上次选中的账号/模型安排刷新，覆盖宿主没有逐次暴露 HTTP 错误的情况。错误回调不等待网络，不修改业务结果。单次刷新失败保留仍有效的旧 state；重复错误合并，每组默认最短间隔 60 秒。已明确额度耗尽的探测（usage_limit_reached / insufficient_quota）默认退避 900 秒，刷新 state 不能恢复账号额度。
+
+后台只维护已知缓存/错误触发的账号模型，不会枚举未知模型。禁用或删除的账号不会继续发送上游探测。进程停止/热替换时会取消并等待后台任务退出。过期 state 默认不注入。background_refresh 和 refresh_on_errors 默认开启，设为 false 可关闭对应功能。
 
 长度只是配置的筛选规则，不代表已经验证“高算力”，本插件不做智力测试、不解密 state，也不保证上游一定签发 state。
 
@@ -31,6 +35,9 @@ plugins:
         accepted_blocks: [10, 12]
       probe:
         enabled: true
+        background_refresh: true
+        refresh_on_errors: true
+        quota_backoff_seconds: 900
         timeout_seconds: 15
         retry_seconds: 60
         refresh_before_seconds: 300
@@ -84,7 +91,7 @@ v0.1.x 缓存只记录账号，没有模型信息，v0.2.0 不会复用它。建
 GET /v0/management/codex-turn-state/status
 ```
 
-返回版本、探测启用状态、账号匿名摘要、模型、state 长度、签发/到期时间及最近探测结果；不返回 state、账号 token 或代理密码。例如 `upstream_http_429_usage_limit_reached` 表示已连接 Codex，但账号额度限制导致探测失败。
+返回版本、后台启用状态、账号匿名摘要、模型、state 长度、签发/到期时间、next_refresh_at、refresh_pending、last_probe_reason 和最近探测结果；不返回 state、账号 token 或代理密码。例如 `upstream_http_429_usage_limit_reached` 表示已连接 Codex，但账号额度限制导致探测失败。next_refresh_at 是考虑冷却/额度退避后的下一次可尝试时间；排队可能带来少量延迟。
 
 当前支持 Codex OAuth、标准 ChatGPT Codex endpoint、HTTP/SSE；不对 API-key/自定义 base_url 账号发独立探测，不主动刷新 OAuth token，token 刷新继续由 CPA 负责。WebSocket state 捕获仍未实现。
 
@@ -100,6 +107,6 @@ go vet ./...
 
 DLL 输出到 `dist/windows-amd64/cpa-codex-turn-state.dll`。安装路径及标准 ABI 说明见 [README.md](README.md)。
 
-运行中升级建议使用 CPA 支持的版本化文件名 `cpa-codex-turn-state-v0.2.0.dll`：插件 ID 仍为 `cpa-codex-turn-state`，新的路径让宿主执行真正的 DLL 热替换；仅覆盖同路径文件并重新加载配置可能仍使用旧 DLL。保留旧 DLL 作为回退。
+从 v0.2.0 升级可直接沿用 v2 缓存。运行中升级使用版本化文件名 `cpa-codex-turn-state-v0.3.0.dll`：插件 ID 仍为 `cpa-codex-turn-state`，新的路径让宿主执行真正的 DLL 热替换；仅覆盖同路径文件并重新加载配置可能仍使用旧 DLL。保留旧 DLL 作为回退。
 
 实测 Go 插件链式传输到 HTTPS IP 查询成功。真实 Codex 探测中，一些账号返回 429，已确认一次错误为 usage_limit_reached；另一个账号完整完成并返回 356 字符、13 块的 state，按当前策略拒绝。网络/捕获成功不等于取得可接受的 state。单元测试验证隔离、池切换、失败复用、SSE 成功判定、取消和 IPv6 编码；原生 DLL ABI 和 CPA 7.3.6.1 宿主加载也已验证。

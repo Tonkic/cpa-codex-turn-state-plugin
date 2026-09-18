@@ -13,6 +13,9 @@ plugins:
         accepted_blocks: [10, 12]
       probe:
         enabled: true
+        background_refresh: true
+        refresh_on_errors: true
+        quota_backoff_seconds: 900
         timeout_seconds: 15
         retry_seconds: 60
         refresh_before_seconds: 300
