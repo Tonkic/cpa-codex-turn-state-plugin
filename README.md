@@ -68,3 +68,7 @@ Build artifact: dist/windows-amd64/cpa-codex-turn-state.dll. Install under plugi
 For a running host, deploy as cpa-codex-turn-state-v0.3.0.dll. CPA recognizes the version suffix while preserving the plugin ID. Its hot replacement depends on a changed selected file path; overwriting the same path may leave the old module loaded. Retain the previous artifact for rollback. Run python scripts/smoke-dll.py to exercise the actual native ABI before deployment.
 
 Tests cover account/model isolation, expiry, cooldown, pool fallback, concurrency/reconfiguration, SSE completion validation, chained CONNECT headers, credential isolation, cancellation, IPv6 encoding and buffered tunnel data. Optional live tests require explicit CPA_LIVE_PROXY_URL; Codex tests additionally require CPA_LIVE_AUTH_FILE. Set CPA_LIVE_FIRST_PROXY_URL for a first hop and CPA_LIVE_CONNECT_HOST only when necessary. They do not print exit IP addresses, credentials or full state. Normal CI uses synthetic credentials only; do not provide production secrets to CI.
+
+## Related Links
+
+- [LINUX DO](https://linux.do/) — 新的理想型社区
