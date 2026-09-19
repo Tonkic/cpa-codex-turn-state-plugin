@@ -94,11 +94,13 @@ func (state *runtimeState) selectedProbeAuth(authID string) (probeAuth, error) {
 	}
 	var listing struct {
 		Files []struct {
-			ID       string `json:"id"`
-			Index    string `json:"auth_index"`
-			Provider string `json:"provider"`
-			Disabled bool   `json:"disabled"`
-			BaseURL  string `json:"base_url"`
+			ID          string `json:"id"`
+			Index       string `json:"auth_index"`
+			Provider    string `json:"provider"`
+			Name        string `json:"name"`
+			AccountType string `json:"account_type"`
+			Disabled    bool   `json:"disabled"`
+			BaseURL     string `json:"base_url"`
 		} `json:"files"`
 	}
 	if err := state.hostCall("host.auth.list", struct{}{}, &listing); err != nil {
@@ -110,6 +112,9 @@ func (state *runtimeState) selectedProbeAuth(authID string) (probeAuth, error) {
 		}
 		if entry.Disabled || entry.Provider != "codex" || entry.BaseURL != "" {
 			return probeAuth{}, errors.New("auth not eligible for Codex probe")
+		}
+		if strings.EqualFold(inferredAccountPlan(entry.Name, entry.AccountType), "free") {
+			return probeAuth{}, errors.New("free auth is excluded from Codex probe")
 		}
 		var result struct {
 			JSON probeAuth `json:"json"`
@@ -134,7 +139,7 @@ func (state *runtimeState) ensureProbe(authID, model string) {
 	cfg := state.config
 	policy, ok := credentialFor(cfg, authID)
 	now := state.now()
-	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 4 {
+	if !state.accepting || !cfg.Probe.Enabled || state.probeCtx == nil || state.probeCtx.Err() != nil || !ok || isFreePlan(policy.Plan) || !autoUpdateEnabled(cfg, policy) || !matchesModels(policy.Models, model) || state.probing[key] || len(state.probing) >= 4 {
 		state.mu.Unlock()
 		return
 	}

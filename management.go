@@ -298,6 +298,7 @@ type accountInfo struct {
 	AuthIndex     string `json:"auth_index,omitempty"`
 	Provider      string `json:"provider,omitempty"`
 	Label         string `json:"label,omitempty"`
+	Plan          string `json:"plan,omitempty"`
 	Status        string `json:"status,omitempty"`
 	StatusMessage string `json:"status_message,omitempty"`
 	Disabled      bool   `json:"auth_disabled"`
@@ -305,6 +306,16 @@ type accountInfo struct {
 	Priority      int    `json:"priority,omitempty"`
 	Success       int64  `json:"success,omitempty"`
 	Failed        int64  `json:"failed,omitempty"`
+}
+
+func inferredAccountPlan(name, accountType string) string {
+	value := strings.ToLower(strings.TrimSpace(name + " " + accountType))
+	for _, plan := range []string{"free", "plus", "team", "pro"} {
+		if strings.Contains(value, "-"+plan) || strings.Contains(value, "_"+plan) || strings.Contains(value, " "+plan) {
+			return plan
+		}
+	}
+	return ""
 }
 
 // accountsByHash maps the anonymous account digest back to host credential
@@ -338,10 +349,10 @@ func (state *runtimeState) accountsByHash() (map[string]accountInfo, bool) {
 				Type          string `json:"type"`
 				Provider      string `json:"provider"`
 				Label         string `json:"label"`
+				AccountType   string `json:"account_type"`
 				Status        string `json:"status"`
 				Email         string `json:"email"`
 				Account       string `json:"account"`
-				AccountType   string `json:"account_type"`
 				Disabled      bool   `json:"disabled"`
 				Unavailable   bool   `json:"unavailable"`
 				BaseURL       string `json:"base_url"`
@@ -365,6 +376,7 @@ func (state *runtimeState) accountsByHash() (map[string]accountInfo, bool) {
 				AuthIndex:     strings.TrimSpace(entry.AuthIndex),
 				Provider:      strings.TrimSpace(entry.Provider),
 				Label:         strings.TrimSpace(entry.Label),
+				Plan:          inferredAccountPlan(entry.Name, entry.AccountType),
 				Status:        strings.TrimSpace(entry.Status),
 				StatusMessage: strings.TrimSpace(entry.StatusMessage),
 				Disabled:      entry.Disabled,
@@ -395,6 +407,15 @@ func (state *runtimeState) accountsByHash() (map[string]accountInfo, bool) {
 		cached = index
 	}
 	return cached, errList == nil
+}
+
+func (state *runtimeState) authIsFree(authID string) bool {
+	accounts, resolved := state.accountsByHash()
+	if !resolved {
+		return false
+	}
+	info, ok := accounts[accountDigest(authID)]
+	return ok && strings.EqualFold(info.Plan, "free")
 }
 
 // --- status payload ---------------------------------------------------------
@@ -601,10 +622,17 @@ func (state *runtimeState) statusPayload() statusView {
 	entries := make([]entryView, 0, len(snapshots))
 	configuredAuths := make(map[string]int)
 	modelSet := make(map[string]bool)
+	visibleAccounts := make(map[string]bool)
 	counters := statusCounters{}
 	for _, item := range snapshots {
 		authID, model := splitStateKey(item.key)
 		digest := accountDigest(authID)
+		if resolved {
+			info, known := accounts[digest]
+			if !known || strings.EqualFold(info.Plan, "free") {
+				continue
+			}
+		}
 		policy, managed := credentialFor(cfg, authID)
 		issuedAt := item.current.IssuedAt
 		expiresAt := issuedAt.Add(turnStateTTL)
@@ -681,9 +709,14 @@ func (state *runtimeState) statusPayload() statusView {
 			counters.Failed++
 		}
 		entries = append(entries, entry)
+		visibleAccounts[digest] = true
 	}
 	counters.Models = len(modelSet)
-	counters.Accounts = len(accounts)
+	if resolved {
+		counters.Accounts = len(visibleAccounts)
+	} else {
+		counters.Accounts = len(accounts)
+	}
 
 	configured := make([]configuredView, 0, len(cfg.Credentials))
 	for rawAuthID, credential := range cfg.Credentials {

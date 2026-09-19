@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.4.5"
+	pluginVersion     = "0.4.6"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096
@@ -431,6 +431,9 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 	if model == "" {
 		return okEnvelope(requestInterceptResponse{})
 	}
+	if state.authIsFree(authID) {
+		return okEnvelope(requestInterceptResponse{ClearHeaders: []string{turnStateHeader}})
+	}
 	key := stateKey(authID, model)
 	state.ensureProbe(authID, model)
 
@@ -440,7 +443,7 @@ func (state *runtimeState) interceptAfter(raw []byte) ([]byte, error) {
 		return okEnvelope(requestInterceptResponse{})
 	}
 	credential, exists := credentialFor(state.config, authID)
-	if !exists || !matchesModels(credential.Models, req.Model, req.RequestedModel) {
+	if !exists || isFreePlan(credential.Plan) || !matchesModels(credential.Models, req.Model, req.RequestedModel) {
 		return okEnvelope(requestInterceptResponse{})
 	}
 	if req.RequestID != "" && autoUpdateEnabled(state.config, credential) {
@@ -622,6 +625,10 @@ func normalizeCredential(credential credentialConfig) (credentialConfig, error) 
 	sort.Ints(accepted)
 	credential.AcceptedBlocks = accepted
 	return credential, nil
+}
+
+func isFreePlan(plan string) bool {
+	return strings.EqualFold(strings.TrimSpace(plan), "free")
 }
 
 func normalBlockCount(credential credentialConfig, blocks int) bool {
