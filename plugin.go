@@ -20,7 +20,7 @@ import (
 
 const (
 	pluginName        = "cpa-codex-turn-state"
-	pluginVersion     = "0.4.4"
+	pluginVersion     = "0.4.5"
 	pluginSchema      = uint32(4)
 	pluginABIVersion  = uint32(1)
 	defaultMaxBytes   = 4096

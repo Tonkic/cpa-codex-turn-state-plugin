@@ -88,7 +88,7 @@ probe:
     - url: http://127.0.0.1:1
 """
     registration = call("plugin.register", {"schema_version": 4, "config_yaml": base64.b64encode(config.encode()).decode()})
-    assert registration["metadata"]["Version"] == "0.4.4"
+    assert registration["metadata"]["Version"] == "0.4.5"
     req = {"RequestID": "smoke", "ToFormat": "codex", "Model": "model-a", "Metadata": {"selected_auth_id": "synthetic-auth"}}
     call("request.intercept_after", req)
     assert callbacks == ["host.auth.list", "host.auth.get"]
@@ -104,7 +104,7 @@ probe:
     status = call("management.handle", {"Method": "GET", "Path": "/codex-turn-state/status"})
     body = base64.b64decode(status["Body"])
     assert token.encode() not in body and b"synthetic-token" not in body
-    assert json.loads(body)["version"] == "0.4.4"
+    assert json.loads(body)["version"] == "0.4.5"
     # A distinct model with an old synthetic seed must refresh from a background
     # C-to-host callback, without an intercept/request to trigger it.
     old = base64.urlsafe_b64encode(b"\x80" + struct.pack("!Q", int(time.time()) - 56 * 60) + bytes(16 + 160 + 32)).decode()

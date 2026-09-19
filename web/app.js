@@ -711,6 +711,30 @@
     });
   }
 
+  function groupByAccount(entries) {
+    var groups = {};
+    entries.forEach(function (entry) {
+      var id = entry.account || entry.email || entry.key;
+      if (!groups[id]) groups[id] = { account: id, items: [], keys: [] };
+      groups[id].items.push(entry);
+      if (entry.key) groups[id].keys.push(entry.key);
+    });
+    return Object.keys(groups).map(function (id) {
+      var group = groups[id];
+      group.items = sortEntries(group.items);
+      group.primary = group.items.slice().sort(function (a, b) {
+        return severityOf(bucketOf(a)) - severityOf(bucketOf(b));
+      })[0] || group.items[0];
+      return group;
+    }).sort(function (left, right) {
+      var mode = el('sortSelect').value;
+      if (mode === 'account') return String(left.primary.email || left.account).localeCompare(String(right.primary.email || right.account));
+      if (mode === 'model') return String(left.items[0].model).localeCompare(String(right.items[0].model));
+      if (mode === 'expiry') return Math.min.apply(null, left.items.map(function (e) { return e.seconds_to_expiry || 0; })) - Math.min.apply(null, right.items.map(function (e) { return e.seconds_to_expiry || 0; }));
+      return severityOf(bucketOf(left.primary)) - severityOf(bucketOf(right.primary));
+    });
+  }
+
   function renderMetrics() {
     var counters = payload.counters || {};
     el('metricValid').textContent = counters.valid || 0;
@@ -739,41 +763,37 @@
 
   function renderRows() {
     var rows = el('entryRows');
-    var entries = sortEntries(filteredEntries());
-    el('entryCount').textContent = entries.length + ' / ' + ((payload.entries || []).length);
+    var entries = filteredEntries();
+    var groups = groupByAccount(entries);
+    var totalGroups = groupByAccount((payload && payload.entries) || []).length;
+    el('entryCount').textContent = groups.length + ' / ' + totalGroups;
     el('tableDescription').textContent = t('tableDescription');
     if (!entries.length) {
       rows.innerHTML = '<tr><td class="empty" colspan="9">' + esc(t('emptyRows')) + '</td></tr>';
       return;
     }
-    rows.innerHTML = entries.map(function (entry) {
+    rows.innerHTML = groups.map(function (group) {
+      var entry = group.primary;
       var bucket = bucketOf(entry);
-      var expires = parseTime(entry.expires_at);
-      var refresh = parseTime(entry.next_refresh_at);
-      var issued = parseTime(entry.issued_at);
-      var probeAt = parseTime(entry.last_probe_at);
-      var probeText = probeLabel(entry.last_probe);
-      var probeMeta = [];
-      if (entry.last_probe_reason) probeMeta.push(reasonLabel(entry.last_probe_reason));
-      if (entry.last_probe_at) probeMeta.push(fmtStamp(probeAt));
-      if (entry.quota_backoff && entry.blocked_until) probeMeta.push(t('backoffUntil', { t: fmtClock(parseTime(entry.blocked_until)) }));
-      var plan = entry.plan ? esc(entry.plan) : (entry.expected_blocks ? String(entry.expected_blocks) : '—');
+      var models = group.items.map(function (item) { return '<div><span class="mono">' + esc(item.model) + '</span></div>'; }).join('');
+      var states = group.items.map(function (item) { return '<div>' + stateCell(item) + '</div>'; }).join('');
+      var issued = group.items.map(function (item) { var value = parseTime(item.issued_at); return value ? '<div class="time-cell"><span>' + esc(fmtClock(value)) + '</span><small>' + esc(fmtStamp(value)) + '</small></div>' : ''; }).join('');
+      var expires = group.items.map(function (item) { var value = parseTime(item.expires_at); return value && item.state_length ? '<div class="time-cell"><span>' + esc(fmtStamp(value)) + '</span><small data-countdown="' + esc(item.seconds_to_expiry) + '">' + esc(fmtDuration(item.seconds_to_expiry)) + '</small></div>' : '<span class="muted">—</span>'; }).join('');
+      var refresh = group.items.map(function (item) { var value = parseTime(item.next_refresh_at); return value ? '<div class="time-cell"><span>' + esc(fmtStamp(value)) + '</span><small data-countdown="' + esc(item.seconds_to_refresh) + '">' + esc(fmtDuration(item.seconds_to_refresh)) + '</small></div>' : '<span class="muted">—</span>'; }).join('');
+      var probes = group.items.map(function (item) { var meta = []; if (item.last_probe_reason) meta.push(reasonLabel(item.last_probe_reason)); if (item.last_probe_at) meta.push(fmtStamp(parseTime(item.last_probe_at))); return '<div class="time-cell"><span>' + esc(probeLabel(item.last_probe)) + '</span><small>' + esc(meta.join(' · ')) + '</small></div>'; }).join('');
+      var keyData = encodeURIComponent(JSON.stringify(group.keys));
       return '<tr>' +
         '<td><span class="badge ' + bucket + '">' + esc(bucketLabel(bucket)) + '</span>' +
           (entry.probing ? ' <span class="muted">…</span>' : '') +
           (entry.refresh_pending ? ' <span class="muted">' + esc(reasonLabel(entry.refresh_pending)) + '</span>' : '') + '</td>' +
         '<td>' + accountCell(entry) + '</td>' +
-        '<td><span class="mono">' + esc(entry.model) + '</span><br><small class="muted">' + plan + '</small></td>' +
-        '<td>' + stateCell(entry) + '</td>' +
-        '<td>' + (issued ? '<div class="time-cell"><span>' + esc(fmtClock(issued)) + '</span><small>' + esc(fmtStamp(issued)) + '</small></div>' : '<span class="muted">' + esc(t('noState')) + '</span>') + '</td>' +
-        '<td>' + (expires && entry.state_length
-          ? '<div class="time-cell"><span>' + esc(fmtStamp(expires)) + '</span><small data-countdown="' + esc(entry.seconds_to_expiry) + '">' + esc(fmtDuration(entry.seconds_to_expiry)) + '</small></div>'
-          : '<span class="muted">—</span>') + '</td>' +
-        '<td>' + (refresh
-          ? '<div class="time-cell"><span>' + esc(fmtStamp(refresh)) + '</span><small data-countdown="' + esc(entry.seconds_to_refresh) + '">' + esc(fmtDuration(entry.seconds_to_refresh)) + '</small></div>'
-          : '<span class="muted">—</span>') + '</td>' +
-        '<td><div class="time-cell"><span>' + esc(probeText) + '</span><small>' + esc(probeMeta.join(' · ')) + '</small></div></td>' +
-        '<td><button class="button ghost tiny" type="button" data-refresh-key="' + esc(entry.key) + '">' + esc(t('actions')) + '</button></td>' +
+        '<td>' + models + '</td>' +
+        '<td>' + states + '</td>' +
+        '<td>' + (issued || '<span class="muted">' + esc(t('noState')) + '</span>') + '</td>' +
+        '<td>' + expires + '</td>' +
+        '<td>' + refresh + '</td>' +
+        '<td>' + probes + '</td>' +
+        '<td><button class="button ghost tiny" type="button" data-refresh-keys="' + esc(keyData) + '">' + esc(t('actions')) + '</button></td>' +
       '</tr>';
     }).join('');
   }
@@ -981,9 +1001,10 @@
     }).finally(function () { setBusy(false); });
   }
 
-  function refreshEntry(entryKey, button) {
+  function refreshEntry(entryKeys, button) {
     if (button) button.disabled = true;
-    api('/refresh', { method: 'POST', body: { keys: [entryKey] } }).then(function (result) {
+    var keys = Array.isArray(entryKeys) ? entryKeys : [entryKeys];
+    api('/refresh', { method: 'POST', body: { keys: keys } }).then(function (result) {
       var queued = (result.queued || []).length;
       var skipped = result.skipped || [];
       if (queued) {
@@ -1032,9 +1053,13 @@
 
   function bind() {
     el('entryRows').addEventListener('click', function (event) {
-      var button = event.target.closest('button[data-refresh-key]');
+      var button = event.target.closest('button[data-refresh-keys]');
       if (!button) return;
-      refreshEntry(button.getAttribute('data-refresh-key'), button);
+      try {
+        refreshEntry(JSON.parse(decodeURIComponent(button.getAttribute('data-refresh-keys'))), button);
+      } catch (error) {
+        toast(t('loadFailed'), true);
+      }
     });
     ['statusFilter', 'modelFilter', 'sortSelect'].forEach(function (id) {
       el(id).addEventListener('change', function () { renderRows(); tick(); });
