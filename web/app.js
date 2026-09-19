@@ -1083,8 +1083,6 @@
     if (localKey) key = localKey;
     if (!key) {
       requestParentManagementKey();
-      showNotice(t('noticeKeyMissing') + ' ' + t('noticeBody'));
-      return;
     }
     setBusy(true);
     load().finally(function () {
