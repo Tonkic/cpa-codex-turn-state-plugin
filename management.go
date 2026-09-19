@@ -410,11 +410,12 @@ func (state *runtimeState) accountsByHash() (map[string]accountInfo, bool) {
 }
 
 func (state *runtimeState) authIsFree(authID string) bool {
-	accounts, resolved := state.accountsByHash()
-	if !resolved {
+	state.accounts.mu.Lock()
+	defer state.accounts.mu.Unlock()
+	if state.accounts.byHash == nil || state.accounts.fetchedAt.IsZero() || state.now().Sub(state.accounts.fetchedAt) >= accountCacheTTL {
 		return false
 	}
-	info, ok := accounts[accountDigest(authID)]
+	info, ok := state.accounts.byHash[accountDigest(authID)]
 	return ok && strings.EqualFold(info.Plan, "free")
 }
 
