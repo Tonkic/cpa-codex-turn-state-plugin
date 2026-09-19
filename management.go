@@ -54,6 +54,7 @@ func managementRegistration() managementRegistrationResponse {
 				Menu:        "Codex Turn State",
 				Description: "Inspect and maintain every OAuth Codex turn state.",
 			},
+			{Path: "/status", Description: "Read-only Codex Turn State status."},
 		},
 	}
 }
@@ -98,6 +99,9 @@ func (state *runtimeState) handleManagement(raw []byte) ([]byte, error) {
 	if resource {
 		if method != http.MethodGet || (path != resourcePage && path != "/" && path != "/status") {
 			return managementEnvelope(jsonResponse(http.StatusNotFound, map[string]any{"error": "resource_not_found"})), nil
+		}
+		if path == "/status" {
+			return managementEnvelope(jsonResponse(http.StatusOK, state.statusPayload())), nil
 		}
 		page, errPage := renderPanel()
 		if errPage != nil {

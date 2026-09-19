@@ -77,12 +77,15 @@ func TestManagementRegistrationExposesPanelResource(t *testing.T) {
 	if len(declared) != 3 {
 		t.Fatalf("unexpected routes: %#v", registration.Routes)
 	}
-	if len(registration.Resources) != 1 {
+	if len(registration.Resources) != 2 {
 		t.Fatalf("resources = %#v", registration.Resources)
 	}
 	panel := registration.Resources[0]
 	if panel.Path != resourcePage || strings.TrimSpace(panel.Menu) == "" || strings.TrimSpace(panel.Description) == "" {
 		t.Fatalf("panel resource incomplete: %#v", panel)
+	}
+	if registration.Resources[1].Path != "/status" {
+		t.Fatalf("status resource missing: %#v", registration.Resources)
 	}
 	raw, errMarshal := json.Marshal(registration)
 	if errMarshal != nil {
@@ -141,6 +144,13 @@ func TestManagementDispatchServesPanelAndStatus(t *testing.T) {
 	}
 	if entry.Handle == "" || entry.Handle == entry.Account {
 		t.Fatalf("entry handle missing: %#v", entry)
+	}
+	publicStatus := callManagement(t, state, http.MethodGet, "/v0/resource/plugins/cpa-codex-turn-state/status", nil)
+	if publicStatus.StatusCode != http.StatusOK {
+		t.Fatalf("public status code = %d", publicStatus.StatusCode)
+	}
+	if got := decodeStatus(t, publicStatus); got.Plugin != pluginName || got.Version != pluginVersion {
+		t.Fatalf("public status identity = %#v", got)
 	}
 }
 

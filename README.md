@@ -51,7 +51,7 @@ Configured seeds require an exact state_model. A models wildcard is a policy fil
 
 ## Status, panel, and security
 
-GET /v0/management/codex-turn-state/status is management-authenticated. It exposes version, anonymous account digest, optional host-provided account email, model, state length, timestamps, validity, counters, a short probe history, and sanitized probe results. It never returns OAuth tokens, full turn-state values, or proxy URLs.
+GET /v0/management/codex-turn-state/status is management-authenticated. For older cross-origin CPAMP panels, the equivalent read-only resource endpoint `/v0/resource/plugins/cpa-codex-turn-state/status` is also available without a Management Center key so status can render when iframe login handoff is unavailable. Both expose version, anonymous account digest, optional host-provided account email, model, state length, timestamps, validity, counters, a short probe history, and sanitized probe results. They never return OAuth tokens, full turn-state values, or proxy URLs.
 
 CPA Management clients that support plugin resources can open the embedded panel:
 

@@ -10,6 +10,7 @@
 
   var SALT = 'cli-proxy-api-webui::secure-storage';
   var RESOURCE_MARKER = '/v0/resource/plugins/';
+  var RESOURCE_STATUS = '/v0/resource/plugins/cpa-codex-turn-state/status';
   var API_PREFIX = '/v0/management/codex-turn-state';
   var POLL_MS = 5000;
   var STORAGE_KEY = 'cli-proxy-auth';
@@ -500,13 +501,14 @@
 
   function api(path, options) {
     var settings = options || {};
-    var headers = { Authorization: 'Bearer ' + key, Accept: 'application/json' };
+    var headers = { Accept: 'application/json' };
+    if (key) headers.Authorization = 'Bearer ' + key;
     var body;
     if (settings.body) {
       headers['Content-Type'] = 'application/json';
       body = JSON.stringify(settings.body);
     }
-    var target = requestBase() + API_PREFIX + path;
+    var target = requestBase() + (path === '/status' && !key ? RESOURCE_STATUS : API_PREFIX + path);
     return fetch(target, { method: settings.method || 'GET', headers: headers, body: body, cache: 'no-store' }).then(function (response) {
       if (response.status === 404 && baseMode === 'derived' && derivedBase() !== '') {
         baseMode = 'root';
