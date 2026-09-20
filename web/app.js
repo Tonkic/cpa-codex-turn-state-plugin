@@ -514,6 +514,10 @@
         baseMode = 'root';
         return api(path, options);
       }
+      if ((response.status === 401 || response.status === 403) && path === '/status' && key) {
+        key = '';
+        return api(path, options);
+      }
       return response.text().then(function (text) {
         var data = null;
         try { data = text ? JSON.parse(text) : null; } catch (error) { data = null; }
