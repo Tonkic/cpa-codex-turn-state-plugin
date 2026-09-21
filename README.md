@@ -1,4 +1,10 @@
-# CPA Codex Turn State Plugin v0.4.1
+# CPA Codex Turn State Plugin v0.4.8
+
+> **Maintenance paused / 方法已失效**
+>
+> The upstream behavior this plugin depended on is no longer stable or reliable. In particular, captured `X-Codex-Turn-State` values are frequently rejected, expire without becoming usable, or are superseded by upstream quota and overload responses (`429`/`502`). This repository is retained for reference only and is no longer under active development. Do not deploy it for new production workloads.
+>
+> **维护暂停：** 本插件依赖的上游机制已经失效或不再可靠。捕获的 `X-Codex-Turn-State` 经常被拒绝、过期后无法继续使用，或者受到上游额度与过载响应（`429`/`502`）影响。本仓库仅保留作历史参考，暂停继续开发，不建议新生产环境部署。
 
 A native CLIProxyAPI DLL that acquires and refreshes opaque X-Codex-Turn-State values per selected credential **and actual upstream model**. Business requests keep their existing CPA proxy; independent lightweight probes use a separate HTTP/SOCKS proxy pool with optional chaining.
 
